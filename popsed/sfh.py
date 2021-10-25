@@ -1,0 +1,342 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# From https://github.com/bd-j/prospector/blob/main/prospect/plotting/sfh.py, with minor bug fixed.
+
+from argparse import Namespace
+from copy import deepcopy
+
+import numpy as np
+from scipy.special import gamma, gammainc
+from prospect.models.transforms import logsfr_ratios_to_masses
+
+__all__ = ["params_to_sfh", "parametric_pset",
+           "parametric_cmf", "parametric_mwa", "parametric_sfr",
+           "compute_mass_formed", "sfh_quantiles",
+           "sfh_to_cmf"]
+
+
+def params_to_sfh(params, time=None, agebins=None):
+
+    parametric = (time is not None)
+
+    if parametric:
+        taus, tages, masses = params["tau"], params["tage"], params["mass"]
+        sfhs = []
+        cmfs = []
+        for tau, tage, mass in zip(taus, tages, masses):
+            sfpar = dict(tau=tau, tage=tage, mass=mass, sfh=params["sfh"])
+            sfhs.append(parametric_sfr(times=time, tavg=0, **sfpar))
+            cmfs.append(parametric_cmf(times=time, **sfpar))
+        lookback = time.max() - time
+        sfhs = np.array(sfhs)
+        cmfs = np.array(cmfs)
+
+    else:
+        logmass = params["logmass"]
+        logsfr_ratios = params["logsfr_ratios"]
+        sfhs = np.array([ratios_to_sfrs(logm, sr, agebins)
+                        for logm, sr in zip(logmass, logsfr_ratios)])
+        cmfs = sfh_to_cmf(sfhs, agebins)
+        lookback = 10**(agebins-9)
+
+    return lookback, sfhs, cmfs
+
+
+def parametric_pset(logmass=None, **sfh):
+    """Convert a dicionary of FSPS parametric SFH parameters into a
+    namespace, making sure they are at least 1d vectors
+    :param sfh: dicionary
+        FSPS parameteric SFH parameters
+    :returns pset:
+        A Namespace instance with attributes giving the SFH parameters
+    """
+    # TODO: make multiple psets if any of the SFH parameters have np.size() > 1
+
+    vectors = ["mass", "sf_start", "tage", "tau", "const",
+               "fburst", "tburst", "sf_trunc", "sf_slope"]
+    pset = Namespace(mass=1.0, sfh=4., sf_start=0, tage=1,
+                     tau=1.,
+                     const=0.,
+                     fburst=0., tburst=1.,
+                     sf_trunc=0, sf_slope=0.)
+
+    if logmass:
+        sfh["mass"] = 10**logmass
+    for k in vars(pset).keys():
+        if k in sfh:
+            setattr(pset, k, sfh[k])
+    # vectorize
+    for k in vectors:
+        setattr(pset, k, np.atleast_1d(getattr(pset, k)))
+
+    return pset
+
+
+def sfh_quantiles(tvec, bins, sfrs, weights=None, q=[16, 50, 84]):
+    """Compute quantiles of a binned SFH
+    :param tvec: shape (ntime,)
+        Vector of lookback times onto which the SFH will be interpolated.
+    :param bins: shape (nsamples, nbin, 2)
+        The age bins, in linear untis, same units as tvec
+    :param sfrs: shape (nsamples, nbin)
+        The SFR in each bin
+    :returns sfh_q: shape(ntime, nq)
+        The quantiles of the SFHs at each lookback time in `tvec`
+    """
+    tt = bins.reshape(bins.shape[0], -1)
+    ss = np.array([sfrs, sfrs]).transpose(1, 2, 0).reshape(bins.shape[0], -1)
+    sf = np.array([np.interp(tvec, t, s, left=0, right=0)
+                  for t, s in zip(tt, ss)])
+    if weights is not None:
+        qq = quantile(sf.T, q=np.array(q)/100., weights=weights)
+    else:
+        qq = np.percentile(sf, axis=0, q=q)
+    return qq
+
+
+def parametric_sfr(times=None, tavg=1e-3, tage=1, **sfh):
+    """Return the SFR (Msun/yr) for the given parameters of a parametric SFH,
+    optionally averaging over some timescale.
+    :param times: (optional, ndarray)
+        If given, a set of *lookback* times where you want to calculate the sfr,
+        same units as `tau` and `tage`
+    :param tavg: (optional, float, default: 1e-3)
+        If non-zero, average the SFR over the last `tavg` Gyr. This can help
+        capture bursts.  If zero, the instantaneous SFR will be returned.
+    :param sfh: optional keywords
+        FSPS parametric SFH parametrs, e.g. sfh, tage, tau, sf_trunc
+    :returns sfr:
+        SFR in M_sun/year either for the lookback times given by `times` or at
+        lookback time 0 if no times are given.  The SFR will either be
+        instaneous or averaged over the last `tavg` Gyr.
+    """
+    if times is None:
+        times = np.array(tage)
+
+    pset = parametric_pset(tage=tage, **sfh)
+    sfr, mass = compute_mass_formed(tage - times, pset)
+    if tavg > 0:
+        _, meps = compute_mass_formed((tage - times) - tavg, pset)
+        sfr = (mass - meps) / (tavg * 1e9)
+    return sfr
+
+
+def parametric_cmf(times=None, tage=1., **sfh):
+    """Return the cumulative formed mass for the given parameters of a
+    parametric SFH.
+    :param times: (optional, ndarray)
+        If given, a set of *lookback* times (relative to `tage`) where you want
+        to calculate the formed mass, in Gyr.  If not given, the formed mass
+        will be computed for loockback time of 0.
+    :param sfh: optional keywords
+        FSPS parametric SFH parametrs, e.g. sfh, tage, tau, sf_trunc
+    :returns mass: (ndarray)
+        Mass formed up to the supplied lookback time, in units of M_sun.
+        Same shape as `times`
+    """
+    if times is None:
+        times = np.array(sfh["tage"])
+
+    pset = parametric_pset(tage=tage, **sfh)
+    _, mass = compute_mass_formed(tage - times, pset)
+    return mass
+
+
+def parametric_mwa_numerical(tau=4, tage=13.7, power=1, n=1000):
+    """Compute Mass-weighted age
+    :param power: (optional, default: 1)
+        Use 0 for exponential decline, and 1 for te^{-t} (delayed exponential decline)
+    """
+    p = power + 1
+    t = np.linspace(0, tage, n)
+    tavg = np.trapz((t**p)*np.exp(-t/tau), t) / \
+        np.trapz(t**(power) * np.exp(-t/tau), t)
+    return tage - tavg
+
+
+def parametric_mwa(tau=4, tage=13.7, power=1):
+    """Compute Mass-weighted age. This is done analytically
+    :param power: (optional, default: 1)
+        Use 0 for exponential decline, and 1 for te^{-t} (delayed exponential decline)
+    """
+    tt = tage / tau
+    mwt = gammainc(power+2, tt) * gamma(power+2) / gammainc(power+1, tt) * tau
+    return tage - mwt
+
+
+def sfh_to_cmf(sfrs, agebins):
+    sfrs = np.atleast_2d(sfrs)
+    dt = (10**agebins[:, 1] - 10**agebins[:, 0])
+    masses = (sfrs * dt)[..., ::-1]
+    cmfs = masses.cumsum(axis=-1)
+    cmfs /= cmfs[..., -1][..., None]
+    zshape = list(cmfs.shape[:-1]) + [1]
+    zeros = np.zeros(zshape)
+    cmfs = np.append(zeros, cmfs, axis=-1)
+    ages = 10**(np.array(agebins) - 9)
+    ages = np.array(ages[:, 0].tolist() + [ages[-1, 1]])
+    return ages, np.squeeze(cmfs[..., ::-1])
+
+
+def compute_mass_formed(times, pset):
+    """Compute the SFR and stellar mass formed in a parametric SFH,
+    as a function of (forward) time.
+    The linear portion of the Simha SFH (sfh=5) is defined as:
+        psi(t) = psi_trunc + psi_trunc * sf_slope * (t - sf_trunc)
+    where psi_trunc is the SFR of the delay-tau SFH at time sf_trunc
+    :param times: ndarray of shape (nt,)
+        Forward time in Gyr. Use times = pset.tage - t_lookback to
+        convert from lookback times
+    :param pset: Namespace instance
+        The FSPS SFH parameters, assumed to be scalar or 1 element 1-d arrays.
+        Usually the output of parametric_pset()
+    :returns sfr: ndarray of shape (nt,)
+        The instaneous SFR in M_sun/yr at each of `times`
+    :returns mfromed: ndarray of shape (nt,)
+        The total stellar mass formed from t=0 to `times`, in unist of M_sun
+    """
+    # TODO: use broadcasting to deal with multiple sfhs?
+
+    # subtract sf_start
+    tmass = pset.tage - pset.sf_start  # the age at which the mass is *specified*
+    # the ages at which sfr and formed mass are requested
+    tprime = times - pset.sf_start
+
+    if pset.sfh == 3:
+        raise NotImplementedError("This method does not support tabular SFH")
+
+    if tmass < 0:
+        raise ValueError("SF never started (tage - sf_start < 0)")
+
+    if (pset.const + pset.fburst) > 1:
+        raise ValueError("Constant and burst fractions combine to be > 1")
+
+    if (pset.sfh == 0):
+        # SSPs
+        mfrac = 1.0 * (tprime > tmass)
+        sfr = np.zeros_like(tprime)  # actually the sfr is infinity
+
+    elif pset.sfh > 0:
+        # Compute tau model component, for SFH=1,4,5
+        #
+        # Integration limits are from 0 to tmax and 0 to tprime, where
+        #   - tmass is the tage, and
+        #   - tprime is the given `time`,
+        #   - ttrunc is where the delay-tau truncates
+        ttrunc, tend = np.max(tprime), tmass
+        if (pset.sf_trunc > 0) and (pset.sf_trunc > pset.sf_start):
+            # Otherwise we integrate tau model to sf_trunc - sf_start
+            ttrunc = pset.sf_trunc - pset.sf_start
+            tend = min(tmass, ttrunc)
+
+        # Now integrate to get mass formed by Tprime and by Tmax, dealing with
+        # truncation that happens after sf_start but before Tmax and/or Tprime.
+        power = 1 + int(pset.sfh > 3)
+        total_mass_tau = pset.tau * gammainc(power, tend / pset.tau)
+
+        tt = np.clip(tprime, 0, ttrunc)
+        mass_tau = (tprime > 0.) * pset.tau * gammainc(power, tt / pset.tau)
+        # The SFR at Tprime (unnormalized)
+        sfr_tau = (tprime > 0.) * (tprime <= ttrunc) * (tprime /
+                                                        pset.tau)**(power-1.) * np.exp(-tprime / pset.tau)
+        # fraction of tau component mass formed by tprime
+        mfrac_tau = mass_tau / total_mass_tau
+
+    # Add the constant and burst portions, for SFH=1,4.
+    if ((pset.sfh == 1) or (pset.sfh == 4)):
+        # Fraction of the burst mass formed by Tprime
+        tburst = (pset.tburst - pset.sf_start)
+        mfrac_burst = 1.0 * (tprime > tburst)
+        # SFR from constant portion at Tprime (integrates to 1 at tmax)
+        sfr_const = (tprime > 0) * 1.0 / tmass
+        # fraction of constant mass formed by tprime
+        mfrac_const = np.clip(tprime, 0, ttrunc) * sfr_const
+
+        # Add formed mass fractions for each component, weighted by component fractions.
+        # Fraction of the constant mass formed by Tprime is just Tprime/Tmax
+        # TODO : The FSPS source does not include the tburst < tmass logic....
+        mfrac = ((1. - pset.const - pset.fburst * (tburst < tmass)) * mfrac_tau +
+                 pset.const * mfrac_const +
+                 pset.fburst * mfrac_burst)
+
+        # N.B. for Tprime = tburst, sfr is infinite, but we ignore that case.
+        sfr = ((1. - pset.const - pset.fburst) * sfr_tau /
+               total_mass_tau + pset.const * sfr_const)
+        # We've truncated
+        sfr *= (tprime <= ttrunc)
+
+    # Add the linear portion, for Simha, SFH=5.
+    # This is the integral of sfr_trunc*(1 - m * (T - Ttrunc)) from Ttrunc to Tz
+    elif (pset.sfh == 5):
+        #raise NotImplementedError
+
+        m = -pset.sf_slope
+        if (m > 0):
+            # find time at which SFR=0, if m>0
+            Tz = ttrunc + 1.0 / m
+        else:
+            # m <= 0 will never reach SFR=0
+            Tz = np.max(tprime)
+
+        # Logic for Linear portion
+        if (ttrunc < 0):
+            # Truncation does not occur during the SFH.
+            total_mass_linear = 0.
+            mass_linear = 0.
+            sfr = sfr_tau / total_mass_tau
+        else:
+            # Truncation does occur, integrate linear to zero crossing or tage.
+            Thi = min(Tz, tmass)
+            sfr_trunc = (ttrunc/pset.tau) * np.exp(-ttrunc / pset.tau)
+            total_mass_linear = (Thi > ttrunc) * sfr_trunc * \
+                linear_mass(Thi, ttrunc, m)
+            mass_linear = (tprime > ttrunc) * sfr_trunc * \
+                linear_mass(tprime, ttrunc, m)
+            mass_linear[tprime > Tz] = sfr_trunc * linear_mass(Tz, ttrunc, m)
+            # SFR in linear portion
+            sfr = sfr_trunc * (1 - m * (tprime - ttrunc)) / \
+                (total_mass_tau + total_mass_linear)
+            sfr *= ((tprime > ttrunc) & (tprime <= Tz))
+            # add portion for tau
+            sfr[tprime <= ttrunc] = sfr_tau[tprime <= ttrunc] / \
+                (total_mass_tau + total_mass_linear)
+
+        mfrac = (mass_tau + mass_linear) / (total_mass_tau + total_mass_linear)
+
+    return pset.mass * sfr/1e9, pset.mass * mfrac
+
+
+def ratios_to_sfrs(logmass, logsfr_ratios, agebins):
+    """scalar
+    """
+    masses = logsfr_ratios_to_masses(np.squeeze(logmass),
+                                     np.squeeze(logsfr_ratios),
+                                     agebins)
+    dt = (10**agebins[:, 1] - 10**agebins[:, 0])
+    sfrs = masses / dt
+    return sfrs
+
+
+def nonpar_recent_sfr(logmass, logsfr_ratios, agebins, sfr_period=0.1):
+    """vectorized
+    """
+    masses = [logsfr_ratios_to_masses(np.squeeze(logm), np.squeeze(sr), agebins)
+              for logm, sr in zip(logmass, logsfr_ratios)]
+    masses = np.array(masses)
+    ages = 10**(agebins - 9)
+    # fractional coverage of the bin by the sfr period
+    ft = np.clip((sfr_period - ages[:, 0]) / (ages[:, 1] - ages[:, 0]), 0., 1)
+    mformed = (ft * masses).sum(axis=-1)
+    return mformed / (sfr_period * 1e9)
+
+
+def nonpar_mwa(logmass, logsfr_ratios, agebins):
+    """mass-weighted age, vectorized
+    """
+    sfrs = np.array([ratios_to_sfrs(logm, sr, agebins)
+                     for logm, sr in zip(logmass, logsfr_ratios)])
+    ages = 10**(agebins)
+    dtsq = (ages[:, 1]**2 - ages[:, 0]**2) / 2
+    mwa = [(dtsq * sfr).sum() / 10**logm
+           for sfr, logm in zip(sfrs, logmass)]
+    return np.array(mwa) / 1e9
