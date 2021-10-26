@@ -216,7 +216,7 @@ def build_mock(sps, model,
 # --------------
 
 
-def build_obs(dlambda_spec=2.0, wave_lo=3800, wave_hi=7000.,
+def build_obs(sps, model, dlambda_spec=2.0, wave_lo=3800, wave_hi=7000.,
               filterset=None,
               snr_spec=10., snr_phot=20., add_noise=True, seed=101,
               add_realism=False, mask_elines=False,
@@ -244,7 +244,109 @@ def build_obs(dlambda_spec=2.0, wave_lo=3800, wave_hi=7000.,
         lngth as the number of filters, for heteroscedastic noise.
 
     :param add_noise: (optional, boolean, default: True)
-        Whether to add a noise reealization to the spectroscopy.
+        Whether to add a noise realization to the spectroscopy.
+
+    :param seed: (optional, int, default: 101)
+        If greater than 0, use this seed in the RNG to get a deterministic
+        noise for adding to the mock data.
+
+    :param add_realism:
+        If set, add a realistic S/N and instrumental dispersion based on a
+        given SDSS spectrum.
+
+    :returns obs:
+        Dictionary of observational data.
+    """
+    # --- Make the Mock ----
+    # In this demo we'll make a mock.  But we need to know which wavelengths
+    # and filters to mock up.
+    has_spectrum = np.any(snr_spec > 0)
+    if has_spectrum:
+        a = 1 + kwargs.get("zred", 0.0)
+        wavelength = np.arange(wave_lo, wave_hi, dlambda_spec) * a
+    else:
+        wavelength = None
+
+    if np.all(snr_phot <= 0):
+        filterset = None
+
+    # We need the models to make a mock.
+    # sps = build_sps(add_realism=add_realism, **kwargs)
+    # model = build_model(conintuum_optimize=continuum_optimize,
+    #                     mask_elines=mask_elines, **kwargs)
+
+    # Make spec uncertainties realistic ?
+    if has_spectrum & add_realism:
+        # This uses an actual SDSS spectrum to get a realistic S/N curve,
+        # renormalized to have median S/N given by the snr_spec parameter
+        sdss_spec, _, _ = load_sdss(**kwargs)
+        snr_profile = sdss_spec['flux'] * np.sqrt(sdss_spec['ivar'])
+        good = np.isfinite(snr_profile)
+        snr_vec = np.interp(
+            wavelength, 10**sdss_spec['loglam'][good], snr_profile[good])
+        snr_spec = snr_spec * snr_vec / np.median(snr_vec)
+
+    mock = build_mock(sps, model, filterset=filterset, snr_phot=snr_phot,
+                      wavelength=wavelength, snr_spec=snr_spec,
+                      add_noise=add_noise, seed=seed)
+
+    # continuum normalize ?
+    if has_spectrum & continuum_optimize:
+        # This fits a low order polynomial to the spectrum and then divides by
+        # that to get a continuum normalized spectrum.
+        cont, _ = fit_continuum(
+            mock["wavelength"], mock["spectrum"], normorder=6, nreject=3)
+        cont = cont / cont.mean()
+        mock["spectrum"] /= cont
+        mock["unc"] /= cont
+        mock["continuum"] = cont
+
+    # Spectroscopic Masking
+    if has_spectrum & mask_elines:
+        mock['mask'] = np.ones(len(mock['wavelength']), dtype=bool)
+        a = (1 + model.params['zred'])  # redshift the mask
+        # mask everything > L(Ha)/100
+        lines = np.array([3727, 3730, 3799.0, 3836.5, 3870., 3890.2, 3970,  # OII + H + NeIII
+                          # H[b,g,d]  + OIII
+                          4103., 4341.7, 4862.7, 4960.3, 5008.2,
+                          4472.7, 5877.2, 5890.0,           # HeI + NaD
+                          6302.1, 6549.9, 6564.6, 6585.3,   # OI + NII + Halpha
+                          6680.0, 6718.3, 6732.7, 7137.8])  # HeI + SII + ArIII
+        mock['mask'] = mock['mask'] & eline_mask(
+            mock['wavelength'], lines * a, 9.0 * a)
+
+    return mock
+
+
+def _build_obs(dlambda_spec=2.0, wave_lo=3800, wave_hi=7000.,
+               filterset=None,
+               snr_spec=10., snr_phot=20., add_noise=True, seed=101,
+               add_realism=False, mask_elines=False,
+               continuum_optimize=False, **kwargs):
+    """Load a mock
+
+    :param wave_lo:
+        The (restframe) minimum wavelength of the spectrum.
+
+    :param wave_hi:
+        The (restframe) maximum wavelength of the spectrum.
+
+    :param dlambda_spec:
+        The (restframe) wavelength sampling or spacing of the spectrum.
+
+    :param filterset:
+        A list of `sedpy` filter names.  Mock photometry will be generated
+        for these filters.
+
+    :param snr_spec:
+        S/N ratio for the spectroscopy per pixel.  scalar.
+
+    :param snr_phot:
+        The S/N of the phock photometry.  This can also be a vector of same
+        lngth as the number of filters, for heteroscedastic noise.
+
+    :param add_noise: (optional, boolean, default: True)
+        Whether to add a noise realization to the spectroscopy.
 
     :param seed: (optional, int, default: 101)
         If greater than 0, use this seed in the RNG to get a deterministic
