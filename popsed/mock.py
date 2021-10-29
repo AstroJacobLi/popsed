@@ -8,7 +8,7 @@ from sedpy.observate import load_filters
 
 from prospect.sources.constants import cosmo
 
-from exspect.utils import build_mock
+#from exspect.utils import build_mock
 from exspect.utils import set_sdss_lsf, load_sdss
 from exspect.utils import fit_continuum, eline_mask
 
