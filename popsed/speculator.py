@@ -229,7 +229,8 @@ def FC(input_size, output_size):
         nn.Linear(input_size, output_size),
         nn.BatchNorm1d(output_size),
         CustomActivation(output_size),
-        nn.Dropout(p=0.2))
+        nn.Dropout(p=0.2)
+    )
 
 
 class Network(nn.Module):
@@ -273,9 +274,6 @@ class Speculator():
         # normalization of log spectrum
         self.log_spectrum_shift = self.pca.log_spectrum_shift
 
-        self.pca_shift = self.pca.pca_shift  # normalization of PCA coefficients
-        self.pca_scale = self.pca.pca_scale  # normalization of PCA coefficients
-
         self.network = Network(
             self.n_parameters, self.hidden_size, self.n_pca_components)
 
@@ -284,12 +282,23 @@ class Speculator():
 
     def load_data(self, pca_coeff, params, val_frac=0.2, batch_size=32):
         # Normalize PCA coefficients
+        #self.pca_scale[0] = 8
+        self.pca_shift = np.median(pca_coeff, axis=0)
+        self.pca_scale = np.std(pca_coeff, axis=0)
+        self.param_shift = np.median(params, axis=0)
+        self.param_scale = np.std(params, axis=0)
+
         pca_coeff = (pca_coeff - self.pca_shift) / self.pca_scale
+        #params = (params - self.param_shift) / self.param_scale
+
+        assert len(pca_coeff) == len(
+            params), 'PCA coefficients and parameters must have the same length'
+
         self.n_samples = len(pca_coeff)
 
         # Translate data to tensor
-        x = torch.FloatTensor(params)
-        y = torch.FloatTensor(pca_coeff)
+        x = torch.FloatTensor(params)  # physical parameters
+        y = torch.FloatTensor(pca_coeff)  # PCA coefficients
         dataset = TensorDataset(x, y)
 
         val_len = int(self.n_samples * val_frac)
@@ -307,10 +316,14 @@ class Speculator():
         self.dataloaders = dataloaders
 
     def train(self, learning_rate=0.002, n_epochs=50, display=False):
-        # train_loss_history = []
-        # val_loss_history = []
         optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
         loss_fn = nn.MSELoss()
+        # Here I use a weighted MSE loss to emphasize the first element of PCA coefficients
+        # def weighted_mse_loss(input, target):
+        #     weight = torch.ones(self.n_pca_components)
+        #     weight[0] = 3
+        #     return torch.sum(weight * (input - target) ** 2)
+        # loss_fn = weighted_mse_loss
 
         for epoch in range(n_epochs):
             running_loss = 0.0
@@ -324,12 +337,14 @@ class Speculator():
                 # Iterate over data.
                 for inputs, labels in self.dataloaders[phase]:
                     inputs = Variable(inputs)
-                    labels = Variable(labels)
+                    labels = Variable(labels)  # .double()
 
                     optimizer.zero_grad()
 
                     with torch.set_grad_enabled(phase == 'train'):
                         outputs = self.network(inputs)
+                        # outputs = torch.add(torch.mul(outputs.double(), torch.from_numpy(
+                        #     self.pca_scale).double()), torch.from_numpy(self.pca_shift).double())
                         loss = loss_fn(outputs, labels)
                         # backward + optimize only if in training phase
                         if phase == 'train':
@@ -361,6 +376,13 @@ class Speculator():
         plt.yscale('log')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
+
+    def predict(self, params):
+        params = torch.FloatTensor(params)
+        pca_coeff = self.network(params).detach().numpy()
+        pca_coeff = pca_coeff * self.pca_scale + self.pca_shift
+
+        return pca_coeff
 
     def predict_spec(self, params):
         params = torch.FloatTensor(params)
