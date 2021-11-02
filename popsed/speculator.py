@@ -13,6 +13,7 @@ import torch.optim as optim
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 from torch.utils.data import TensorDataset, DataLoader
+from sklearn.preprocessing import StandardScaler
 
 
 class SpectrumPCA():
@@ -20,7 +21,7 @@ class SpectrumPCA():
     SPECULATOR PCA compression class
     """
 
-    def __init__(self, n_parameters, n_wavelengths, n_pcas, log_spectrum_filenames, parameter_filenames, parameter_selection=None):
+    def __init__(self, n_parameters, n_wavelengths, n_pcas, log_spectrum_filenames, parameter_selection=None):
         """
         Constructor.
         :param n_parameters: number of SED model parameters (inputs to the network)
@@ -35,82 +36,24 @@ class SpectrumPCA():
         self.n_wavelengths = n_wavelengths
         self.n_pcas = n_pcas
         self.log_spectrum_filenames = log_spectrum_filenames
-        self.parameter_filenames = parameter_filenames
-        self.n_batches = len(self.parameter_filenames)
 
+        # Data scaler
+        self.logspec_scaler = StandardScaler()
         # PCA object
         self.PCA = IncrementalPCA(n_components=self.n_pcas)
-
         # parameter selection (implementing any cuts on strange parts of parameter space)
         self.parameter_selection = parameter_selection
 
-    # compute shift and scale for spectra and parameters
-    def compute_spectrum_parameters_shift_and_scale(self):
-
-        # shift and scale
-        self.log_spectrum_shift = np.zeros(self.n_wavelengths)
-        self.log_spectrum_scale = np.zeros(self.n_wavelengths)
-        self.parameter_shift = np.zeros(self.n_parameters)
-        self.parameter_scale = np.zeros(self.n_parameters)
-
-        # loop over training data files, accumulate means and std deviations
-        for i in range(self.n_batches):
-
-            # accumulate assuming no parameter selection
-            if self.parameter_selection is None:
-                self.log_spectrum_shift += np.mean(
-                    np.load(self.log_spectrum_filenames[i]), axis=0)/self.n_batches
-                self.log_spectrum_scale += np.std(
-                    np.load(self.log_spectrum_filenames[i]), axis=0)/self.n_batches
-                self.parameter_shift += np.mean(
-                    np.load(self.parameter_filenames[i]), axis=0)/self.n_batches
-                self.parameter_scale += np.std(
-                    np.load(self.parameter_filenames[i]), axis=0)/self.n_batches
-            # else make selections and accumulate
-            else:
-                # import spectra and make parameter-based cut
-                log_spectra = np.load(self.log_spectrum_filenames[i])
-                parameters = np.load(self.parameter_filenames[i])
-                selection = self.parameter_selection(parameters)
-
-                # update shifts and scales
-                self.log_spectrum_shift += np.mean(
-                    log_spectra[selection, :], axis=0)/self.n_batches
-                self.log_spectrum_scale += np.std(
-                    log_spectra[selection, :], axis=0)/self.n_batches
-                self.parameter_shift += np.mean(
-                    parameters[selection, :], axis=0)/self.n_batches
-                self.parameter_scale += np.std(
-                    parameters[selection, :], axis=0)/self.n_batches
+    def scale_spectra(self):
+        # scale spectra
+        log_spec = np.concatenate([np.load(self.log_spectrum_filenames[i])
+                                  for i in range(len(self.log_spectrum_filenames))])
+        self.logspec_scaler.fit(log_spec)
+        self.normalized_logspec = self.logspec_scaler.transform(log_spec)
 
     # train PCA incrementally
     def train_pca(self):
-
-        # loop over training data files, increment PCA
-        for i in range(self.n_batches):
-
-            if self.parameter_selection is None:
-
-                # load spectra and shift+scale
-                normalized_log_spectra = (np.load(
-                    self.log_spectrum_filenames[i]) - self.log_spectrum_shift)/self.log_spectrum_scale
-
-                # partial PCA fit
-                self.PCA.partial_fit(normalized_log_spectra)
-
-            else:
-
-                # select based on parameters
-                selection = self.parameter_selection(
-                    np.load(self.parameter_filenames[i]))
-
-                # load spectra and shift+scale
-                normalized_log_spectra = (np.load(self.log_spectrum_filenames[i])[
-                                          selection, :] - self.log_spectrum_shift)/self.log_spectrum_scale
-
-                # partial PCA fit
-                self.PCA.partial_fit(normalized_log_spectra)
-
+        self.PCA.partial_fit(self.normalized_logspec)
         # set the PCA transform matrix
         self.pca_transform_matrix = self.PCA.components_
 
@@ -118,60 +61,37 @@ class SpectrumPCA():
     def transform_and_stack_training_data(self, filename, retain=False):
 
         # transform the spectra to PCA basis
-        training_pca = np.concatenate([self.PCA.transform((np.load(
-            self.log_spectrum_filenames[i]) - self.log_spectrum_shift)/self.log_spectrum_scale) for i in range(self.n_batches)])
-
-        # stack the input parameters
-        training_parameters = np.concatenate(
-            [np.load(self.parameter_filenames[i]) for i in range(self.n_batches)])
-
-        if self.parameter_selection is not None:
-            selection = self.parameter_selection(training_parameters)
-            training_pca = training_pca[selection, :]
-            training_parameters = training_parameters[selection, :]
-
-        # shift and scale of PCA basis
-        self.pca_shift = np.mean(training_pca, axis=0)
-        self.pca_scale = np.std(training_pca, axis=0)
+        training_pca = self.PCA.transform(self.normalized_logspec)
 
         if filename is not None:
             # save stacked transformed training data
             # the PCA coefficients
             np.save(filename + '_coeffs.npy', training_pca)
-            # corresponding parameters
-            np.save(filename + '_params.npy', training_parameters)
 
         # retain training data as attributes if retain == True
         if retain:
             self.training_pca = training_pca
-            self.training_parameters = training_parameters
 
     # make a validation plot of the PCA given some validation data
     def validate_pca_basis(self, log_spectrum_filename):
 
         # load in the data (and select based on parameter selection if neccessary)
         if self.parameter_selection is None:
-
             # load spectra and shift+scale
             log_spectra = np.load(log_spectrum_filename)
-            normalized_log_spectra = (
-                log_spectra - self.log_spectrum_shift)/self.log_spectrum_scale
-
+            normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
         else:
-
-            # select based on parameters
             selection = self.parameter_selection(
                 np.load(self.parameter_filename))
 
             # load spectra and shift+scale
             log_spectra = np.load(log_spectrum_filename)[selection, :]
-            normalized_log_spectra = (
-                log_spectra - self.log_spectrum_shift)/self.log_spectrum_scale
+            normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
 
         # transform to PCA basis and back
         log_spectra_pca = self.PCA.transform(normalized_log_spectra)
-        log_spectra_in_basis = np.dot(
-            log_spectra_pca, self.pca_transform_matrix)*self.log_spectrum_scale + self.log_spectrum_shift
+        log_spectra_in_basis = self.logspec_scaler.inverse_transform(
+            self.PCA.inverse_transform(log_spectra_pca))
 
         # return raw spectra and spectra in basis
         return log_spectra, log_spectra_in_basis
@@ -229,7 +149,7 @@ def FC(input_size, output_size):
         nn.Linear(input_size, output_size),
         nn.BatchNorm1d(output_size),
         CustomActivation(output_size),
-        nn.Dropout(p=0.2)
+        nn.Dropout(p=0.5)
     )
 
 
@@ -265,7 +185,7 @@ class Speculator():
         self.hidden_size = hidden_size  # e.g., [100, 100, 100]
         self.n_pca_components = n_pca_components  # e.g., n_pca_components = 20
         # e.g., wavelengths = np.arange(3800, 7000, 2)
-        #self.wavelengths = wavelengths
+        # self.wavelengths = wavelengths
         self.pca_filename = pca_filename
         with open(self.pca_filename, 'rb') as f:
             self.pca = pickle.load(f)
@@ -282,14 +202,14 @@ class Speculator():
 
     def load_data(self, pca_coeff, params, val_frac=0.2, batch_size=32):
         # Normalize PCA coefficients
-        #self.pca_scale[0] = 8
         self.pca_shift = np.median(pca_coeff, axis=0)
         self.pca_scale = np.std(pca_coeff, axis=0)
         self.param_shift = np.median(params, axis=0)
         self.param_scale = np.std(params, axis=0)
+        # self.pca_scale[0] = 2
 
-        pca_coeff = (pca_coeff - self.pca_shift) / self.pca_scale
-        #params = (params - self.param_shift) / self.param_scale
+        # pca_coeff = (pca_coeff - self.pca_shift) / self.pca_scale
+        # params = (params - self.param_shift) / self.param_scale
 
         assert len(pca_coeff) == len(
             params), 'PCA coefficients and parameters must have the same length'
