@@ -147,9 +147,9 @@ class CustomActivation(nn.Module):
 def FC(input_size, output_size):
     return nn.Sequential(
         nn.Linear(input_size, output_size),
-        nn.BatchNorm1d(output_size),
+        # nn.BatchNorm1d(output_size),
         CustomActivation(output_size),
-        nn.Dropout(p=0.5)
+        # nn.Dropout(p=0.5)
     )
 
 
@@ -180,36 +180,30 @@ class Network(nn.Module):
 
 
 class Speculator():
-    def __init__(self, n_parameters=None, n_pca_components=None, wavelengths=None, pca_filename=None, hidden_size=None) -> None:
+    def __init__(self, n_parameters=None, n_pca_components=None, pca_filename=None, hidden_size=None) -> None:
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.n_parameters = n_parameters  # e.g., n_parameters = 9
         self.hidden_size = hidden_size  # e.g., [100, 100, 100]
-        self.n_pca_components = n_pca_components  # e.g., n_pca_components = 20
         # e.g., wavelengths = np.arange(3800, 7000, 2)
         # self.wavelengths = wavelengths
         self.pca_filename = pca_filename
         with open(self.pca_filename, 'rb') as f:
             self.pca = pickle.load(f)
-        # normalization of log spectrum
-        self.log_spectrum_scale = self.pca.log_spectrum_scale
-        # normalization of log spectrum
-        self.log_spectrum_shift = self.pca.log_spectrum_shift
+        self.n_pca_components = len(self.pca.pca_transform_matrix)
+        self.pca_scaler = StandardScaler()
 
         self.network = Network(
             self.n_parameters, self.hidden_size, self.n_pca_components)
+        self.network.to(self.device)
 
         self.train_loss_history = []
         self.val_loss_history = []
+        
 
     def load_data(self, pca_coeff, params, val_frac=0.2, batch_size=32):
         # Normalize PCA coefficients
-        self.pca_shift = np.median(pca_coeff, axis=0)
-        self.pca_scale = np.std(pca_coeff, axis=0)
-        self.param_shift = np.median(params, axis=0)
-        self.param_scale = np.std(params, axis=0)
-        # self.pca_scale[0] = 2
-
-        # pca_coeff = (pca_coeff - self.pca_shift) / self.pca_scale
-        # params = (params - self.param_shift) / self.param_scale
+        self.pca_scaler.fit(pca_coeff)  # scale PCA coefficients
+        pca_coeff = self.pca_scaler.transform(pca_coeff)
 
         assert len(pca_coeff) == len(
             params), 'PCA coefficients and parameters must have the same length'
@@ -256,8 +250,8 @@ class Speculator():
 
                 # Iterate over data.
                 for inputs, labels in self.dataloaders[phase]:
-                    inputs = Variable(inputs)
-                    labels = Variable(labels)  # .double()
+                    inputs = Variable(inputs).to(self.device)
+                    labels = Variable(labels).to(self.device)  # .double()
 
                     optimizer.zero_grad()
 
@@ -298,19 +292,17 @@ class Speculator():
         plt.ylabel('Loss')
 
     def predict(self, params):
-        params = torch.FloatTensor(params)
-        pca_coeff = self.network(params).detach().numpy()
-        pca_coeff = pca_coeff * self.pca_scale + self.pca_shift
+        params = torch.FloatTensor(params).to(self.device)
+        self.network.eval()
+        pca_coeff = self.network(params).detach().cpu().numpy()
+        pca_coeff = self.pca_scaler.inverse_transform(pca_coeff)
 
         return pca_coeff
 
     def predict_spec(self, params):
-        params = torch.FloatTensor(params)
-        pca_coeff = self.network(params).detach().numpy()
-        pca_coeff = pca_coeff * self.pca_scale + self.pca_shift
-
-        spec = self.pca.PCA.inverse_transform(
-            pca_coeff) * self.log_spectrum_scale + self.log_spectrum_shift
+        pca_coeff = self.predict(params)
+        spec = self.pca.logspec_scaler.inverse_transform(self.pca.PCA.inverse_transform(
+            pca_coeff))
 
         return spec
 
