@@ -181,7 +181,8 @@ class Network(nn.Module):
 
 class Speculator():
     def __init__(self, n_parameters=None, n_pca_components=None, pca_filename=None, hidden_size=None) -> None:
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(
+            'cuda' if torch.cuda.is_available() else 'cpu')
         self.n_parameters = n_parameters  # e.g., n_parameters = 9
         self.hidden_size = hidden_size  # e.g., [100, 100, 100]
         # e.g., wavelengths = np.arange(3800, 7000, 2)
@@ -198,7 +199,6 @@ class Speculator():
 
         self.train_loss_history = []
         self.val_loss_history = []
-        
 
     def load_data(self, pca_coeff, params, val_frac=0.2, batch_size=32):
         # Normalize PCA coefficients
@@ -220,7 +220,7 @@ class Speculator():
 
         train_data, val_data = torch.utils.data.random_split(dataset,
                                                              [train_len, val_len],
-                                                             generator=torch.Generator().manual_seed(42))
+                                                             generator=torch.Generator().manual_seed(24))
 
         dataloaders = {}
         dataloaders['train'] = DataLoader(
@@ -230,6 +230,12 @@ class Speculator():
         self.dataloaders = dataloaders
 
     def train(self, learning_rate=0.002, n_epochs=50, display=False):
+        the_last_loss = 1e-3
+        min_loss = 1e-2
+        min_recon_err = 1e-3
+        patience = 20
+        trigger_times = 0
+
         optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
         loss_fn = nn.MSELoss()
         # Here I use a weighted MSE loss to emphasize the first element of PCA coefficients
@@ -274,9 +280,35 @@ class Speculator():
                 if phase == 'val':
                     self.val_loss_history.append(epoch_loss)
 
-                if epoch % 10 == 0:
+                if epoch % 100 == 0:
                     print(
                         'Epoch: {} - {} Loss: {:.4f}'.format(epoch, phase, epoch_loss))
+
+            if epoch_loss > the_last_loss:
+                trigger_times += 1
+                #print('trigger times:', trigger_times)
+                if trigger_times >= patience:
+                    print('Early stopping!\nStart to test process.')
+                    return
+            else:
+                trigger_times = 0
+
+            the_last_loss = epoch_loss
+
+            if epoch_loss < min_loss:
+                min_loss = epoch_loss
+                self.save_model('best_loss_model.pkl')
+                self.best_loss_epoch = epoch
+
+            for x, y in self.dataloaders['val']:
+                spec = self.predict_spec(x)
+                spec_y = self.predict_spec_from_norm_pca(y)
+
+            recon_err = np.median(np.abs((spec - spec_y) / np.abs(spec_y)))
+            if recon_err < min_recon_err:
+                min_recon_err = recon_err
+                self.save_model('best_recon_err_model.pkl')
+                self.best_recon_err_epoch = epoch
 
         if display:
             self.plot_loss()
@@ -306,8 +338,19 @@ class Speculator():
 
         return spec
 
+    def predict_spec_from_norm_pca(self, y):
+        pca_coeff = self.pca_scaler.inverse_transform(y)
+        spec = self.pca.logspec_scaler.inverse_transform(self.pca.PCA.inverse_transform(
+            pca_coeff))
+
+        return spec
+
     def save_model(self, filename):
-        torch.save(self.network.state_dict(), filename)
+        with open(filename, 'wb') as f:
+            pickle.dump(self, f)
+        
+        #torch.save(self, filename)
 
     def load_model(self, filename):
-        self.network.load_state_dict(torch.load(filename))
+        with open(filename, 'rb') as f:
+            self = pickle.load(f)
