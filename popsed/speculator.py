@@ -7,18 +7,66 @@ import pickle
 from sklearn.decomposition import IncrementalPCA
 
 import torch
+from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.preprocessing import StandardScaler
+# from sklearn.preprocessing import StandardScaler
 
 
+class StandardScaler:
+    def __init__(self, mean=None, std=None, epsilon=1e-7, device='cpu'):
+        """Standard Scaler for PyTorch tensors.
+
+        The class can be used to normalize PyTorch Tensors using native functions. The module does not expect the
+        tensors to be of any specific shape; as long as the features are the last dimension in the tensor, the module
+        will work fine.
+
+        :param mean: The mean of the features. The property will be set after a call to fit.
+        :param std: The standard deviation of the features. The property will be set after a call to fit.
+        :param epsilon: Used to avoid a Division-By-Zero exception.
+        """
+        self.mean = mean
+        self.std = std
+        self.epsilon = epsilon
+        self.device = device
+
+    def fit(self, values):
+        self.is_tensor = torch.is_tensor(values)
+        if self.is_tensor:
+            dims = list(range(values.dim() - 1))
+            self.mean = torch.mean(values, dim=dims).to(self.device)
+            self.std = torch.std(values, dim=dims).to(self.device)
+        else: # numpy array
+            dims = list(range(values.ndim - 1))
+            self.mean = np.mean(values, axis=tuple(dims))
+            self.std = np.std(values, axis=tuple(dims))
+
+    def transform(self, values, device=None):
+        if device is None:
+            device = self.device
+
+        if torch.is_tensor(values):
+            return (values - Tensor(self.mean).to(device)) / Tensor(self.std + self.epsilon).to(device)
+        else:
+            return (values - self.mean) / (self.std + self.epsilon)
+
+    def inverse_transform(self, values, device=None):
+        if device is None:
+            device = self.device
+
+        if torch.is_tensor(values):
+            return values * Tensor(self.std).to(device) + Tensor(self.mean).to(device)
+        else:
+            return values * self.std + self.mean
+        
+        
 class SpectrumPCA():
     """
-    SPECULATOR PCA compression class
+    SPECULATOR PCA compression class, tensor enabled
     """
 
     def __init__(self, n_parameters, n_wavelengths, n_pcas, log_spectrum_filenames, parameter_selection=None):
@@ -71,6 +119,14 @@ class SpectrumPCA():
         # retain training data as attributes if retain == True
         if retain:
             self.training_pca = training_pca
+
+    def inverse_transform(self, pca_coeffs, device=None):
+        # inverse transform the PCA coefficients
+        if torch.is_tensor(pca_coeffs):
+            assert device is not None, 'Provide device name in order to manipulate tensors'
+            return torch.matmul(pca_coeffs.to(device), Tensor(self.PCA.components_).to(device)) + Tensor(self.PCA.mean_).to(device)
+        else:
+            return np.dot(self.PCA.components_, pca_coeffs) + self.PCA.mean_
 
     # make a validation plot of the PCA given some validation data
     def validate_pca_basis(self, log_spectrum_filename):
@@ -191,7 +247,7 @@ class Speculator():
         with open(self.pca_filename, 'rb') as f:
             self.pca = pickle.load(f)
         self.n_pca_components = len(self.pca.pca_transform_matrix)
-        self.pca_scaler = StandardScaler()
+        self.pca_scaler = StandardScaler(device=self.device)
 
         self.network = Network(
             self.n_parameters, self.hidden_size, self.n_pca_components)
@@ -303,8 +359,8 @@ class Speculator():
             for x, y in self.dataloaders['val']:
                 spec = self.predict_spec(x)
                 spec_y = self.predict_spec_from_norm_pca(y)
-
-            recon_err = np.median(np.abs((spec - spec_y) / np.abs(spec_y)))
+            
+            recon_err = torch.median(torch.abs((spec - spec_y) / torch.abs(spec_y)))
             if recon_err < min_recon_err:
                 min_recon_err = recon_err
                 self.save_model('best_recon_err_model.pkl')
@@ -324,24 +380,26 @@ class Speculator():
         plt.ylabel('Loss')
 
     def predict(self, params):
-        params = torch.FloatTensor(params).to(self.device)
+        if not torch.is_tensor(params):
+            params = torch.Tensor(params).to(self.device)
+        params = params.to(self.device)
         self.network.eval()
-        pca_coeff = self.network(params).detach().cpu().numpy()
-        pca_coeff = self.pca_scaler.inverse_transform(pca_coeff)
+        pca_coeff = self.network(params)
+        pca_coeff = self.pca_scaler.inverse_transform(pca_coeff, device=self.device)
 
         return pca_coeff
 
     def predict_spec(self, params):
         pca_coeff = self.predict(params)
-        spec = self.pca.logspec_scaler.inverse_transform(self.pca.PCA.inverse_transform(
-            pca_coeff))
+        spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
+            pca_coeff, device=self.device), device=self.device)
 
         return spec
 
     def predict_spec_from_norm_pca(self, y):
-        pca_coeff = self.pca_scaler.inverse_transform(y)
-        spec = self.pca.logspec_scaler.inverse_transform(self.pca.PCA.inverse_transform(
-            pca_coeff))
+        pca_coeff = self.pca_scaler.inverse_transform(y.to(self.device), device=self.device)
+        spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
+            pca_coeff, device=self.device), device=self.device)
 
         return spec
 
