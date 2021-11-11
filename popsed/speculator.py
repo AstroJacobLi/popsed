@@ -14,6 +14,8 @@ import torch.optim as optim
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 from torch.utils.data import TensorDataset, DataLoader
+
+from sedpy import observate
 # from sklearn.preprocessing import StandardScaler
 
 
@@ -63,7 +65,7 @@ class StandardScaler:
         else:
             return values * self.std + self.mean
         
-        
+
 class SpectrumPCA():
     """
     SPECULATOR PCA compression class, tensor enabled
@@ -402,6 +404,22 @@ class Speculator():
             pca_coeff, device=self.device), device=self.device)
 
         return spec
+
+    def predict_sed(self, params, filterset=['sdss_{0}0'.format(b) for b in 'ugriz'], angstroms=np.arange(3000, 11000, 2)):
+        '''
+        Predict magnitudes for a given set of filters.
+        See https://github.com/bd-j/prospector/blob/dda730feef5b8e679864521d0ac1c5f5f3db989c/prospect/models/sedmodel.py#L591
+        '''
+        # get magnitude from a spectrum
+        lightspeed = 2.998e18  # AA/s
+        jansky_cgs = 1e-23
+        
+        f_maggies = 10**self.predict_spec(params).cpu().detach().numpy()
+        f_lambda_cgs = f_maggies * lightspeed / angstroms**2 * (3631 * jansky_cgs)
+        filterlist = observate.load_filters(filterset)
+        mags = observate.getSED(angstroms, f_lambda_cgs, filterlist=filterlist)
+        return mags
+
 
     def save_model(self, filename):
         with open(filename, 'wb') as f:
