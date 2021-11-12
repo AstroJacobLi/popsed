@@ -42,7 +42,7 @@ class StandardScaler:
             dims = list(range(values.dim() - 1))
             self.mean = torch.mean(values, dim=dims).to(self.device)
             self.std = torch.std(values, dim=dims).to(self.device)
-        else: # numpy array
+        else:  # numpy array
             dims = list(range(values.ndim - 1))
             self.mean = np.mean(values, axis=tuple(dims))
             self.std = np.std(values, axis=tuple(dims))
@@ -64,7 +64,7 @@ class StandardScaler:
             return values * Tensor(self.std).to(device) + Tensor(self.mean).to(device)
         else:
             return values * self.std + self.mean
-        
+
 
 class SpectrumPCA():
     """
@@ -238,13 +238,28 @@ class Network(nn.Module):
 
 
 class Speculator():
-    def __init__(self, n_parameters=None, n_pca_components=None, pca_filename=None, hidden_size=None) -> None:
+    """
+    Emulator for spectrum data.
+    """
+
+    def __init__(self, n_parameters: int = None,
+                 wavelengths=None,
+                 pca_filename: str = None,
+                 hidden_size: list = None):
+        """
+        Initialize the emulator.
+
+        Parameters:
+            n_parameters: number of parameters to be used in the emulator.
+            pca_filename: filename of the PCA object to be used.
+            hidden_size: list of hidden layer sizes, e.g., [100, 100, 100].
+        """
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu')
         self.n_parameters = n_parameters  # e.g., n_parameters = 9
         self.hidden_size = hidden_size  # e.g., [100, 100, 100]
         # e.g., wavelengths = np.arange(3800, 7000, 2)
-        # self.wavelengths = wavelengths
+        self.wavelengths = wavelengths
         self.pca_filename = pca_filename
         with open(self.pca_filename, 'rb') as f:
             self.pca = pickle.load(f)
@@ -259,6 +274,15 @@ class Speculator():
         self.val_loss_history = []
 
     def load_data(self, pca_coeff, params, val_frac=0.2, batch_size=32):
+        """
+        Load data into the emulator.
+        
+        Parameters:
+            pca_coeff: PCA coefficients of the spectrum data.
+            params: parameters of the spectrum data, such as tage and tau.
+            val_frac (float): fraction of the data to be used for validation.
+            batch_size (int): batch size for training.
+        """
         # Normalize PCA coefficients
         self.pca_scaler.fit(pca_coeff)  # scale PCA coefficients
         pca_coeff = self.pca_scaler.transform(pca_coeff)
@@ -288,6 +312,14 @@ class Speculator():
         self.dataloaders = dataloaders
 
     def train(self, learning_rate=0.002, n_epochs=50, display=False):
+        """
+        Train the NN emulator.
+        
+        Parameters:
+            learning_rate (float): learning rate for the optimizer, default = 0.002.
+            n_epochs (int): number of epochs for training, default = 50.
+            display (bool): whether to display training/validation loss, default = False.
+        """
         the_last_loss = 1e-3
         min_loss = 1e-2
         min_recon_err = 1e-3
@@ -296,12 +328,6 @@ class Speculator():
 
         optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
         loss_fn = nn.MSELoss()
-        # Here I use a weighted MSE loss to emphasize the first element of PCA coefficients
-        # def weighted_mse_loss(input, target):
-        #     weight = torch.ones(self.n_pca_components)
-        #     weight[0] = 3
-        #     return torch.sum(weight * (input - target) ** 2)
-        # loss_fn = weighted_mse_loss
 
         for epoch in range(n_epochs):
             running_loss = 0.0
@@ -361,8 +387,9 @@ class Speculator():
             for x, y in self.dataloaders['val']:
                 spec = self.predict_spec(x)
                 spec_y = self.predict_spec_from_norm_pca(y)
-            
-            recon_err = torch.median(torch.abs((spec - spec_y) / torch.abs(spec_y)))
+
+            recon_err = torch.median(
+                torch.abs((spec - spec_y) / torch.abs(spec_y)))
             if recon_err < min_recon_err:
                 min_recon_err = recon_err
                 self.save_model('best_recon_err_model.pkl')
@@ -372,6 +399,9 @@ class Speculator():
             self.plot_loss()
 
     def plot_loss(self):
+        """
+        Plot loss curve.
+        """
         import matplotlib.pyplot as plt
         plt.plot(np.array(self.train_loss_history).flatten(), label='Train loss')
         plt.plot(np.array(self.val_loss_history).flatten(), label='Val loss')
@@ -382,16 +412,23 @@ class Speculator():
         plt.ylabel('Loss')
 
     def predict(self, params):
+        """
+        Predict the PCA coefficients of the spectrum, given physical parameters.
+        """
         if not torch.is_tensor(params):
             params = torch.Tensor(params).to(self.device)
         params = params.to(self.device)
         self.network.eval()
         pca_coeff = self.network(params)
-        pca_coeff = self.pca_scaler.inverse_transform(pca_coeff, device=self.device)
+        pca_coeff = self.pca_scaler.inverse_transform(
+            pca_coeff, device=self.device)
 
         return pca_coeff
 
     def predict_spec(self, params):
+        """
+        Predict corresponding log spectrum, given physical parameters.
+        """
         pca_coeff = self.predict(params)
         spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
             pca_coeff, device=self.device), device=self.device)
@@ -399,34 +436,224 @@ class Speculator():
         return spec
 
     def predict_spec_from_norm_pca(self, y):
-        pca_coeff = self.pca_scaler.inverse_transform(y.to(self.device), device=self.device)
+        pca_coeff = self.pca_scaler.inverse_transform(
+            y.to(self.device), device=self.device)
         spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
             pca_coeff, device=self.device), device=self.device)
 
         return spec
 
-    def predict_sed(self, params, filterset=['sdss_{0}0'.format(b) for b in 'ugriz'], angstroms=np.arange(3000, 11000, 2)):
+    def predict_mag(self, params, 
+                    filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'], 
+                    angstroms=np.arange(3000, 11000, 2)):
         '''
-        Predict magnitudes for a given set of filters.
+        Predict magnitudes for a given set of filters, based on the predicted spectrum. SLOW!
         See https://github.com/bd-j/prospector/blob/dda730feef5b8e679864521d0ac1c5f5f3db989c/prospect/models/sedmodel.py#L591
+        
+        Parameters:
+            filterset (list): list of filters to predict, default = ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
+            angstroms (array): wavelength array, default = np.arange(3000, 11000, 2).
         '''
         # get magnitude from a spectrum
         lightspeed = 2.998e18  # AA/s
         jansky_cgs = 1e-23
-        
+
         f_maggies = 10**self.predict_spec(params).cpu().detach().numpy()
-        f_lambda_cgs = f_maggies * lightspeed / angstroms**2 * (3631 * jansky_cgs)
+        f_lambda_cgs = f_maggies * lightspeed / \
+            angstroms**2 * (3631 * jansky_cgs)
         filterlist = observate.load_filters(filterset)
         mags = observate.getSED(angstroms, f_lambda_cgs, filterlist=filterlist)
-        return mags
-
+        
+        return Tensor(mags).to(self.device)
 
     def save_model(self, filename):
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
-        
-        #torch.save(self, filename)
 
-    def load_model(self, filename):
-        with open(filename, 'rb') as f:
-            self = pickle.load(f)
+
+
+class Photulator():
+    """
+    Emulator for photometry data. Directly predict magnitudes from physical parameters.
+    """
+
+    def __init__(self, n_parameters: int = None,
+                 filterset: list = None,
+                 hidden_size: list = None):
+        """
+        Initialize the emulator.
+
+        Parameters:
+            n_parameters: number of parameters to be used in the emulator.
+            hidden_size: list of hidden layer sizes, e.g., [100, 100, 100].
+        """
+        self.device = torch.device(
+            'cuda' if torch.cuda.is_available() else 'cpu')
+        self.n_parameters = n_parameters  # e.g., n_parameters = 9
+        self.hidden_size = hidden_size  # e.g., [100, 100, 100]
+        # e.g., wavelengths = np.arange(3800, 7000, 2)
+        self.filterset = filterset
+        
+        self.n_phot = len(self.filterset)
+        self.phot_scaler = StandardScaler(device=self.device)
+
+        self.network = Network(
+            self.n_parameters, self.hidden_size, self.n_phot)
+        self.network.to(self.device)
+
+        self.train_loss_history = []
+        self.val_loss_history = []
+
+    def load_data(self, phot, params, val_frac=0.2, batch_size=32):
+        """
+        Load data into the emulator.
+        
+        Parameters:
+            phot: magnitudes in each band, not normalized.
+            params: parameters of the spectrum data, such as tage and tau.
+            val_frac (float): fraction of the data to be used for validation.
+            batch_size (int): batch size for training.
+        """
+        # Normalize magnitudes
+        assert phot.shape[1] == self.n_phot, 'Number of bands mismatch.'
+        
+        self.phot_scaler.fit(phot)
+        phot = self.phot_scaler.transform(phot)
+
+        assert len(phot) == len(params), 'magnitudes and parameters must have the same length'
+
+        self.n_samples = len(phot)
+
+        # Translate data to tensor
+        x = torch.FloatTensor(params)  # physical parameters
+        y = torch.FloatTensor(phot)  # PCA coefficients
+        dataset = TensorDataset(x, y)
+
+        val_len = int(self.n_samples * val_frac)
+        train_len = self.n_samples - val_len
+
+        train_data, val_data = torch.utils.data.random_split(dataset,
+                                                             [train_len, val_len],
+                                                             generator=torch.Generator().manual_seed(24))
+
+        dataloaders = {}
+        dataloaders['train'] = DataLoader(
+            train_data, batch_size=batch_size, shuffle=True)
+        dataloaders['val'] = DataLoader(val_data, batch_size=val_len)
+
+        self.dataloaders = dataloaders
+
+    def train(self, learning_rate=0.002, n_epochs=50, display=False):
+        """
+        Train the NN emulator.
+        
+        Parameters:
+            learning_rate (float): learning rate for the optimizer, default = 0.002.
+            n_epochs (int): number of epochs for training, default = 50.
+            display (bool): whether to display training/validation loss, default = False.
+        """
+        the_last_loss = 1e-3
+        min_loss = 1e-2
+        min_recon_err = 1e-3
+        patience = 20
+        trigger_times = 0
+
+        optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
+        loss_fn = nn.MSELoss()
+
+        for epoch in range(n_epochs):
+            running_loss = 0.0
+
+            for phase in ['train', 'val']:
+                if phase == 'train':
+                    self.network.train()  # Set model to training mode
+                else:
+                    self.network.eval()   # Set model to evaluate mode
+
+                # Iterate over data.
+                for inputs, labels in self.dataloaders[phase]:
+                    inputs = Variable(inputs).to(self.device)
+                    labels = Variable(labels).to(self.device)  # .double()
+
+                    optimizer.zero_grad()
+
+                    with torch.set_grad_enabled(phase == 'train'):
+                        outputs = self.network(inputs)
+                        loss = loss_fn(outputs, labels)
+                        # backward + optimize only if in training phase
+                        if phase == 'train':
+                            loss.backward()
+                            optimizer.step()
+
+                    running_loss += loss.item()
+
+                epoch_loss = running_loss / \
+                    len(self.dataloaders[phase].dataset)
+                if phase == 'train':
+                    self.train_loss_history.append(epoch_loss)
+                if phase == 'val':
+                    self.val_loss_history.append(epoch_loss)
+
+                if epoch % 100 == 0:
+                    print(
+                        'Epoch: {} - {} Loss: {:.4f}'.format(epoch, phase, epoch_loss))
+
+            if epoch_loss > the_last_loss:
+                trigger_times += 1
+                if trigger_times >= patience:
+                    print('Early stopping!\nStart to test process.')
+                    return
+            else:
+                trigger_times = 0
+
+            the_last_loss = epoch_loss
+
+            if epoch_loss < min_loss:
+                min_loss = epoch_loss
+                self.save_model('phot_best_loss_model.pkl')
+                self.best_loss_epoch = epoch
+
+            for x, y in self.dataloaders['val']:
+                phot_pre = self.predict_mag(x) # x is params, y is magnitudes
+                phot_val = self.phot_scaler.inverse_transform(y.to(self.device))
+
+            recon_err = torch.median(
+                torch.abs((phot_pre - phot_val) / torch.abs(phot_val)))
+            if recon_err < min_recon_err:
+                min_recon_err = recon_err
+                self.save_model('phot_best_recon_err_model.pkl')
+                self.best_recon_err_epoch = epoch
+
+        if display:
+            self.plot_loss()
+
+    def plot_loss(self):
+        """
+        Plot loss curve.
+        """
+        import matplotlib.pyplot as plt
+        plt.plot(np.array(self.train_loss_history).flatten(), label='Train loss')
+        plt.plot(np.array(self.val_loss_history).flatten(), label='Val loss')
+        plt.legend()
+
+        plt.yscale('log')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+
+    def predict_mag(self, params):
+        """
+        Predict magnitudes, given physical parameters.
+        """
+        if not torch.is_tensor(params):
+            params = torch.Tensor(params).to(self.device)
+        params = params.to(self.device)
+        self.network.eval()
+        phot = self.network(params)
+        phot = self.phot_scaler.inverse_transform(
+            phot, device=self.device)
+
+        return phot
+
+    def save_model(self, filename):
+        with open(filename, 'wb') as f:
+            pickle.dump(self, f)
