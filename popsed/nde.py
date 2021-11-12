@@ -21,6 +21,7 @@ from scipy.linalg import sqrtm
 from scipy.special import digamma
 from sklearn.neighbors import NearestNeighbors
 
+
 def build_maf(
     batch_x: Tensor = None,
     z_score_x: bool = True,
@@ -28,7 +29,7 @@ def build_maf(
     num_transforms: int = 5,
     embedding_net: nn.Module = nn.Identity(),
     **kwargs,
-    ) -> nn.Module:
+) -> nn.Module:
     """Builds MAF to describe p(x).
 
     Args:
@@ -68,10 +69,10 @@ def build_maf(
         ]
     )
 
-    if z_score_x: # normalize the input data
+    if z_score_x:  # normalize the input data
         transform_zx = standardizing_transform(batch_x)
         transform = transforms.CompositeTransform([transform_zx, transform])
-        
+
     distribution = distributions_.StandardNormal((x_numel,))
     neural_net = flows.Flow(transform, distribution, embedding_net).to('cuda')
 
@@ -86,7 +87,7 @@ def build_nsf(
     num_bins: int = 10,
     embedding_net: nn.Module = nn.Identity(),
     **kwargs,
-    ) -> nn.Module:
+) -> nn.Module:
     """Builds NSF to describe p(x).
     Args:
         batch_x: Batch of xs, used to infer dimensionality and (optional) z-scoring.
@@ -146,7 +147,7 @@ def build_nsf(
 
             def __call__(
                 self, inputs: Tensor, context: Tensor, *args, **kwargs
-                ) -> Tensor:
+            ) -> Tensor:
                 """
                 Return parameters of the spline given the context.
                 Args:
@@ -158,8 +159,9 @@ def build_nsf(
                 """
                 return self.spline_predictor(context)
 
-        mask_in_layer = lambda i: tensor([1], dtype=uint8)
-        conditioner = lambda in_features, out_features: ContextSplineMap(
+        def mask_in_layer(i): return tensor([1], dtype=uint8)
+
+        def conditioner(in_features, out_features): return ContextSplineMap(
             in_features, out_features, hidden_features, context_features=None
         )
         if num_transforms > 1:
@@ -173,10 +175,11 @@ def build_nsf(
             )
 
     else:
-        mask_in_layer = lambda i: create_alternating_binary_mask(
+        def mask_in_layer(i): return create_alternating_binary_mask(
             features=x_numel, even=(i % 2 == 0)
         )
-        conditioner = lambda in_features, out_features: nets.ResidualNet(
+
+        def conditioner(in_features, out_features): return nets.ResidualNet(
             in_features=in_features,
             out_features=out_features,
             hidden_features=hidden_features,
@@ -215,74 +218,21 @@ def build_nsf(
 
     return neural_net
 
-def KL_w2009_eq29(X, Y, silent=True):
-    ''' kNN KL divergence estimate using Eq. 29 from Wang et al. (2009). 
-    This has some bias reduction applied to it and a correction for 
-    epsilon.
-    sources 
-    ------- 
-    - Q. Wang, S. Kulkarni, & S. Verdu (2009). Divergence Estimation for Multidimensional Densities Via k-Nearest-Neighbor Distances. IEEE Transactions on Information Theory, 55(5), 2392-2405.
-    '''
-    if torch.is_tensor(X):
-        X = X.cpu().detach().numpy()
-    if torch.is_tensor(Y):
-        Y = Y.cpu().detach().numpy()
-    
-    
-    assert X.shape[1] == Y.shape[1]
-    n, d = X.shape # X sample size, dimensions
-    m = Y.shape[0] # Y sample size
-
-    # first determine epsilon(i)
-    NN_X = NearestNeighbors(n_neighbors=1).fit(X)
-    NN_Y = NearestNeighbors(n_neighbors=1).fit(Y)
-    dNN1_XX, _ = NN_X.kneighbors(X, n_neighbors=2)
-    dNN1_XY, _ = NN_Y.kneighbors(X)
-    eps = np.amax([dNN1_XX[:,1], dNN1_XY[:,0]], axis=0) * 1.000001
-    if not silent: print('  epsilons ', eps)
-
-    # find l_i and k_i
-    _, i_l = NN_X.radius_neighbors(X, eps)
-    _, i_k = NN_Y.radius_neighbors(X, eps)
-    l_i = np.array([len(il)-1 for il in i_l])
-    k_i = np.array([len(ik) for ik in i_k])
-    assert l_i.min() > 0
-    assert k_i.min() > 0
-    if not silent: 
-        print('  l_i ', l_i)
-        print('  k_i ', k_i)
-
-    rho_i = np.empty(n, dtype=float)
-    nu_i = np.empty(n, dtype=float)
-    for i in range(n):
-        rho_ii, _ = NN_X.kneighbors(np.atleast_2d(X[i]), n_neighbors=l_i[i]+1)
-        nu_ii, _ = NN_Y.kneighbors(np.atleast_2d(X[i]), n_neighbors=k_i[i])
-        rho_i[i] = rho_ii[0][-1]
-        nu_i[i] = nu_ii[0][-1]
-
-    assert rho_i.min() > 0., 'duplicate elements in your chain'
-
-    d_corr = float(d) / float(n) * np.sum(np.log(nu_i/rho_i))
-    if not silent:
-        print('  first term = %f' % d_corr) 
-    digamma_term = np.sum(digamma(l_i) - digamma(k_i)) / float(n)
-    if not silent:
-        print('  digamma term = %f' % digamma_term)
-    return d_corr + digamma_term + np.log(float(m)/float(n-1))
 
 class NeuralDensityEstimator(object):
     """
     Neural density estimator.
     """
+
     def __init__(
-        self,
-        normalize: bool = True,
-        method: str = "nsf",
-        hidden_features: int = 50,
-        num_transforms: int = 5,
-        num_bins: int = 10,
-        embedding_net: nn.Module = nn.Identity(),
-        **kwargs):
+            self,
+            normalize: bool = True,
+            method: str = "nsf",
+            hidden_features: int = 50,
+            num_transforms: int = 5,
+            num_bins: int = 10,
+            embedding_net: nn.Module = nn.Identity(),
+            **kwargs):
         """
         Initialize neural density estimator.
         Args:
@@ -295,11 +245,12 @@ class NeuralDensityEstimator(object):
             kwargs: Additional arguments that are passed by the build function but are not
                 relevant for maf and are therefore ignored.
         """
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(
+            'cuda' if torch.cuda.is_available() else 'cpu')
         self.method = method
         self.hidden_features = hidden_features
         self.num_transforms = num_transforms
-        self.num_bins = num_bins # only works for NSF
+        self.num_bins = num_bins  # only works for NSF
         self.normalize = normalize
         self.embedding_net = embedding_net
         self.train_loss_history = []
@@ -331,13 +282,14 @@ class NeuralDensityEstimator(object):
                 embedding_net=self.embedding_net,
                 **kwargs
             )
-        
+
         self.net.to(self.device)
 
         if optimizer == "adam":
             self.optimizer = optim.Adam(self.net.parameters())
         else:
-            raise ValueError(f"Unknown optimizer {optimizer}, only support 'Adam' now.")
+            raise ValueError(
+                f"Unknown optimizer {optimizer}, only support 'Adam' now.")
 
     def train(self, n_epochs: int = 2000, display=False, suffix: str = "nde"):
         """
@@ -347,7 +299,7 @@ class NeuralDensityEstimator(object):
         patience = 5
         self.best_loss_epoch = 0
         self.net.train()
-        
+
         for epoch in trange(n_epochs, desc='Training NDE', unit='epochs'):
             self.optimizer.zero_grad()
             loss = -self.net.log_prob(self.batch_x).mean()
@@ -360,7 +312,8 @@ class NeuralDensityEstimator(object):
                 if epoch - self.best_loss_epoch > patience:
                     # Don't save model too frequently
                     self.best_loss_epoch = epoch
-                    self.save_model(f'best_loss_model_{suffix}_{self.method}.pkl')
+                    self.save_model(
+                        f'best_loss_model_{suffix}_{self.method}.pkl')
 
         if min_loss == -18:
             raise Warning('The training might be failed, try more epochs')
@@ -373,7 +326,6 @@ class NeuralDensityEstimator(object):
         Sample according to the fitted NDE
         """
         return self.net.sample(n_samples)
-
 
     def plot_loss(self):
         import matplotlib.pyplot as plt
@@ -388,3 +340,119 @@ class NeuralDensityEstimator(object):
     def load_model(self, filename):
         with open(filename, 'rb') as f:
             self = pickle.load(f)
+
+
+def KL_w2009_eq29(X, Y, silent=True):
+    """
+    PyTorch implementation of the KL divergence from Wang 2009 eq. 29.
+
+    kNN KL divergence estimate using Eq. 29 from Wang et al. (2009). 
+    This has some bias reduction applied to it and a correction for 
+    epsilon.
+
+    Sources 
+    ------- 
+    - Q. Wang, S. Kulkarni, & S. Verdu (2009). Divergence Estimation for Multidimensional Densities Via k-Nearest-Neighbor Distances. IEEE Transactions on Information Theory, 55(5), 2392-2405.
+    """
+    if torch.is_tensor(X):
+        X = X.cpu().detach().numpy()
+    if torch.is_tensor(Y):
+        Y = Y.cpu().detach().numpy()
+
+    assert X.shape[1] == Y.shape[1]
+    n, d = X.shape  # X sample size, dimensions
+    m = Y.shape[0]  # Y sample size
+
+    # first determine epsilon(i)
+    NN_X = NearestNeighbors(n_neighbors=1).fit(X)
+    NN_Y = NearestNeighbors(n_neighbors=1).fit(Y)
+    dNN1_XX, _ = NN_X.kneighbors(X, n_neighbors=2)
+    dNN1_XY, _ = NN_Y.kneighbors(X)
+    eps = np.amax([dNN1_XX[:, 1], dNN1_XY[:, 0]], axis=0) * 1.000001
+    if not silent:
+        print('  epsilons ', eps)
+
+    # find l_i and k_i
+    _, i_l = NN_X.radius_neighbors(X, eps)
+    _, i_k = NN_Y.radius_neighbors(X, eps)
+    l_i = np.array([len(il)-1 for il in i_l])
+    k_i = np.array([len(ik) for ik in i_k])
+    assert l_i.min() > 0
+    assert k_i.min() > 0
+    if not silent:
+        print('  l_i ', l_i)
+        print('  k_i ', k_i)
+
+    rho_i = np.empty(n, dtype=float)
+    nu_i = np.empty(n, dtype=float)
+    for i in range(n):
+        rho_ii, _ = NN_X.kneighbors(np.atleast_2d(X[i]), n_neighbors=l_i[i]+1)
+        nu_ii, _ = NN_Y.kneighbors(np.atleast_2d(X[i]), n_neighbors=k_i[i])
+        rho_i[i] = rho_ii[0][-1]
+        nu_i[i] = nu_ii[0][-1]
+
+    assert rho_i.min() > 0., 'duplicate elements in your chain'
+
+    d_corr = float(d) / float(n) * np.sum(np.log(nu_i/rho_i))
+    if not silent:
+        print('  first term = %f' % d_corr)
+    digamma_term = np.sum(digamma(l_i) - digamma(k_i)) / float(n)
+    if not silent:
+        print('  digamma term = %f' % digamma_term)
+    return d_corr + digamma_term + np.log(float(m)/float(n-1))
+
+
+def _KL_w2009_eq29(X, Y, silent=True):
+    ''' kNN KL divergence estimate using Eq. 29 from Wang et al. (2009). 
+    This has some bias reduction applied to it and a correction for 
+    epsilon.
+    sources 
+    ------- 
+    - Q. Wang, S. Kulkarni, & S. Verdu (2009). Divergence Estimation for Multidimensional Densities Via k-Nearest-Neighbor Distances. IEEE Transactions on Information Theory, 55(5), 2392-2405.
+    '''
+    if torch.is_tensor(X):
+        X = X.cpu().detach().numpy()
+    if torch.is_tensor(Y):
+        Y = Y.cpu().detach().numpy()
+
+    assert X.shape[1] == Y.shape[1]
+    n, d = X.shape  # X sample size, dimensions
+    m = Y.shape[0]  # Y sample size
+
+    # first determine epsilon(i)
+    NN_X = NearestNeighbors(n_neighbors=1).fit(X)
+    NN_Y = NearestNeighbors(n_neighbors=1).fit(Y)
+    dNN1_XX, _ = NN_X.kneighbors(X, n_neighbors=2)
+    dNN1_XY, _ = NN_Y.kneighbors(X)
+    eps = np.amax([dNN1_XX[:, 1], dNN1_XY[:, 0]], axis=0) * 1.000001
+    if not silent:
+        print('  epsilons ', eps)
+
+    # find l_i and k_i
+    _, i_l = NN_X.radius_neighbors(X, eps)
+    _, i_k = NN_Y.radius_neighbors(X, eps)
+    l_i = np.array([len(il)-1 for il in i_l])
+    k_i = np.array([len(ik) for ik in i_k])
+    assert l_i.min() > 0
+    assert k_i.min() > 0
+    if not silent:
+        print('  l_i ', l_i)
+        print('  k_i ', k_i)
+
+    rho_i = np.empty(n, dtype=float)
+    nu_i = np.empty(n, dtype=float)
+    for i in range(n):
+        rho_ii, _ = NN_X.kneighbors(np.atleast_2d(X[i]), n_neighbors=l_i[i]+1)
+        nu_ii, _ = NN_Y.kneighbors(np.atleast_2d(X[i]), n_neighbors=k_i[i])
+        rho_i[i] = rho_ii[0][-1]
+        nu_i[i] = nu_ii[0][-1]
+
+    assert rho_i.min() > 0., 'duplicate elements in your chain'
+
+    d_corr = float(d) / float(n) * np.sum(np.log(nu_i/rho_i))
+    if not silent:
+        print('  first term = %f' % d_corr)
+    digamma_term = np.sum(digamma(l_i) - digamma(k_i)) / float(n)
+    if not silent:
+        print('  digamma term = %f' % digamma_term)
+    return d_corr + digamma_term + np.log(float(m)/float(n-1))
