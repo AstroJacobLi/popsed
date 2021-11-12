@@ -14,4 +14,8 @@ except DistributionNotFound:
 
 __name__ = 'popsed'
 __author__ = ['Jiaxuan Li']
+<<<<<<< HEAD
 __all__ = ["utils", "mock", "speculator"]
+=======
+__all__ = ["utils", "mock"]
+>>>>>>> d02aea9 (minor)
