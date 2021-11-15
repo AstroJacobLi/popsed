@@ -342,9 +342,10 @@ class NeuralDensityEstimator(object):
             self = pickle.load(f)
 
 
-def KL_w2009_eq29(X, Y, silent=True):
+def diff_KL_w2009_eq29(X, Y, silent=True, frac=1):
     """
-    PyTorch implementation of the KL divergence from Wang 2009 eq. 29.
+    This function is not accurate! Just a rough estimation when X and Y are very different! 
+    PyTorch/Faiss implementation of the KL divergence from Wang 2009 eq. 29.
 
     kNN KL divergence estimate using Eq. 29 from Wang et al. (2009). 
     This has some bias reduction applied to it and a correction for 
@@ -354,6 +355,81 @@ def KL_w2009_eq29(X, Y, silent=True):
     ------- 
     - Q. Wang, S. Kulkarni, & S. Verdu (2009). Divergence Estimation for Multidimensional Densities Via k-Nearest-Neighbor Distances. IEEE Transactions on Information Theory, 55(5), 2392-2405.
     """
+    import faiss
+    import faiss.contrib.torch_utils
+
+    # if not torch.is_tensor(X):
+    #     raise ValueError('The input X must be tensor.')
+    # if not torch.is_tensor(Y):
+    #     raise ValueError('The input Y must be tensor.')
+
+    assert X.shape[1] == Y.shape[1]
+    n, d = X.shape  # X sample size, dimensions
+    m = Y.shape[0]  # Y sample size
+
+    # first determine epsilon(i)
+    NN_X = faiss.IndexFlatL2(d)   # build the index
+    NN_X.add(X)                  # add vectors to the index
+    NN_Y = faiss.IndexFlatL2(d)   # build the index
+    NN_Y.add(Y)                  # add vectors to the index
+    dNN1_XX, _ = NN_X.search(X, int(frac * n))
+    dNN1_XX = torch.sqrt(dNN1_XX[:, 1:])
+
+    dNN1_XY, _ = NN_Y.search(X, int(frac * n))
+    dNN1_XY = torch.sqrt(dNN1_XY)
+
+    eps = torch.amax(
+        torch.cat((dNN1_XX[:, 0:1], dNN1_XY[:, 0:1]), dim=1), 1) * 1.000001
+    eps = eps.type(torch.float64)
+    if not silent:
+        print('  epsilons ', eps)
+
+    # find l_i and k_i, fast now
+    l_i = torch.empty(n, dtype=int)
+    k_i = torch.empty(n, dtype=int)
+    rho_i = torch.empty(n, dtype=float)
+    nu_i = torch.empty(n, dtype=float)
+
+    for i, e in enumerate(eps):
+        l_i[i] = torch.sum(dNN1_XX[i:i+1] <= e)
+        rho_i[i] = dNN1_XX[i:i+1][0][l_i[i] - 1]
+
+        k_i[i] = torch.sum(dNN1_XY[i:i+1] <= e)
+        nu_i[i] = dNN1_XY[i:i+1][0][k_i[i] - 1]
+
+    if not silent:
+        print('  l_i ', l_i)
+        print('  k_i ', k_i)
+
+    assert rho_i.min() >= 0., 'duplicate elements in your chain'
+
+    mask = ~torch.isinf(torch.log(rho_i / nu_i))
+    d_corr = d / n * torch.nansum(torch.log(rho_i / nu_i)[mask])
+
+    if not silent:
+        print('  first term = %f' % d_corr)
+    digamma_term = torch.sum(digamma(l_i) - digamma(k_i)) / n
+    if not silent:
+        print('  digamma term = %f' % digamma_term)
+
+    # l_i, k_i, rho_i, nu_i
+    return d_corr + digamma_term + np.log(float(m)/float(n-1))
+
+
+def KL_w2009_eq29(X, Y, silent=True):
+    """
+    PyTorch/Faiss implementation of the KL divergence from Wang 2009 eq. 29.
+
+    kNN KL divergence estimate using Eq. 29 from Wang et al. (2009). 
+    This has some bias reduction applied to it and a correction for 
+    epsilon.
+
+    Sources 
+    ------- 
+    - Q. Wang, S. Kulkarni, & S. Verdu (2009). Divergence Estimation for Multidimensional Densities Via k-Nearest-Neighbor Distances. IEEE Transactions on Information Theory, 55(5), 2392-2405.
+    """
+    import faiss
+
     if torch.is_tensor(X):
         X = X.cpu().detach().numpy()
     if torch.is_tensor(Y):
@@ -364,32 +440,37 @@ def KL_w2009_eq29(X, Y, silent=True):
     m = Y.shape[0]  # Y sample size
 
     # first determine epsilon(i)
-    NN_X = NearestNeighbors(n_neighbors=1).fit(X)
-    NN_Y = NearestNeighbors(n_neighbors=1).fit(Y)
-    dNN1_XX, _ = NN_X.kneighbors(X, n_neighbors=2)
-    dNN1_XY, _ = NN_Y.kneighbors(X)
-    eps = np.amax([dNN1_XX[:, 1], dNN1_XY[:, 0]], axis=0) * 1.000001
+    NN_X = faiss.IndexFlatL2(d)   # build the index
+    NN_X.add(X)                  # add vectors to the index
+    NN_Y = faiss.IndexFlatL2(d)   # build the index
+    NN_Y.add(Y)                  # add vectors to the index
+    dNN1_XX, _ = NN_X.search(X, 2)
+    dNN1_XY, _ = NN_Y.search(X, 1)
+    eps = np.amax([np.sqrt(dNN1_XX[:, 1]), np.sqrt(
+        dNN1_XY[:, 0])], axis=0) * 1.000001
+    eps = eps.astype('float64')
     if not silent:
         print('  epsilons ', eps)
 
     # find l_i and k_i
-    _, i_l = NN_X.radius_neighbors(X, eps)
-    _, i_k = NN_Y.radius_neighbors(X, eps)
-    l_i = np.array([len(il)-1 for il in i_l])
-    k_i = np.array([len(ik) for ik in i_k])
-    assert l_i.min() > 0
-    assert k_i.min() > 0
+    l_i = np.empty(n, dtype=int)
+    k_i = np.empty(n, dtype=int)
+    rho_i = np.empty(n, dtype=float)
+    nu_i = np.empty(n, dtype=float)
+    for i, e in enumerate(eps):
+        _, dist, index = NN_X.range_search(X[i:i+1], e**2)
+        l_i[i] = len(index) - 1
+        rho_i[i] = np.sqrt(np.max(dist)) if len(index) > 0 else 0
+
+        _, dist, index = NN_Y.range_search(X[i:i+1], e**2)
+        k_i[i] = len(index)
+        nu_i[i] = np.sqrt(np.max(dist)) if len(index) > 0 else 0
+
+    assert np.min(l_i) > 0
+    assert np.min(k_i) > 0
     if not silent:
         print('  l_i ', l_i)
         print('  k_i ', k_i)
-
-    rho_i = np.empty(n, dtype=float)
-    nu_i = np.empty(n, dtype=float)
-    for i in range(n):
-        rho_ii, _ = NN_X.kneighbors(np.atleast_2d(X[i]), n_neighbors=l_i[i]+1)
-        nu_ii, _ = NN_Y.kneighbors(np.atleast_2d(X[i]), n_neighbors=k_i[i])
-        rho_i[i] = rho_ii[0][-1]
-        nu_i[i] = nu_ii[0][-1]
 
     assert rho_i.min() > 0., 'duplicate elements in your chain'
 
