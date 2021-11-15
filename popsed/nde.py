@@ -28,6 +28,7 @@ def build_maf(
     hidden_features: int = 50,
     num_transforms: int = 5,
     embedding_net: nn.Module = nn.Identity(),
+    device: str = 'cuda',
     **kwargs,
 ) -> nn.Module:
     """Builds MAF to describe p(x).
@@ -74,7 +75,7 @@ def build_maf(
         transform = transforms.CompositeTransform([transform_zx, transform])
 
     distribution = distributions_.StandardNormal((x_numel,))
-    neural_net = flows.Flow(transform, distribution, embedding_net).to('cuda')
+    neural_net = flows.Flow(transform, distribution, embedding_net).to(device)
 
     return neural_net
 
@@ -86,6 +87,7 @@ def build_nsf(
     num_transforms: int = 5,
     num_bins: int = 10,
     embedding_net: nn.Module = nn.Identity(),
+    device: str = 'cuda',
     **kwargs,
 ) -> nn.Module:
     """Builds NSF to describe p(x).
@@ -214,7 +216,7 @@ def build_nsf(
         transform = transforms.CompositeTransform([transform_zx, transform])
 
     distribution = distributions_.StandardNormal((x_numel,))
-    neural_net = flows.Flow(transform, distribution, embedding_net).to('cuda')
+    neural_net = flows.Flow(transform, distribution, embedding_net).to(device)
 
     return neural_net
 
@@ -270,6 +272,7 @@ class NeuralDensityEstimator(object):
                 hidden_features=self.hidden_features,
                 num_transforms=self.num_transforms,
                 embedding_net=self.embedding_net,
+                device=self.device,
                 **kwargs
             )
         elif self.method == "nsf":
@@ -280,6 +283,7 @@ class NeuralDensityEstimator(object):
                 num_transforms=self.num_transforms,
                 num_bins=self.num_bins,
                 embedding_net=self.embedding_net,
+                device=self.device,
                 **kwargs
             )
 
