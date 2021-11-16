@@ -48,7 +48,7 @@ def build_maf(
     x_numel = batch_x[0].numel()
 
     if x_numel == 1:
-        warn(f"In one-dimensional output space, this flow is limited to Gaussians")
+        raise Warning(f"In one-dimensional output space, this flow is limited to Gaussians")
 
     transform = transforms.CompositeTransform(
         [
@@ -258,7 +258,7 @@ class NeuralDensityEstimator(object):
         self.embedding_net = embedding_net
         self.train_loss_history = []
 
-    def build(self, batch_x: Tensor, optimizer: str = "adam", **kwargs):
+    def build(self, batch_x: Tensor, optimizer: str = "adam", lr=0.001, **kwargs):
         """
         Build the neural density estimator based on input data.
         """
@@ -291,7 +291,7 @@ class NeuralDensityEstimator(object):
         self.net.to(self.device)
 
         if optimizer == "adam":
-            self.optimizer = optim.Adam(self.net.parameters())
+            self.optimizer = optim.Adam(self.net.parameters(), lr=lr)
         else:
             raise ValueError(
                 f"Unknown optimizer {optimizer}, only support 'Adam' now.")
@@ -347,7 +347,7 @@ class NeuralDensityEstimator(object):
             self = pickle.load(f)
 
 
-def diff_KL_w2009_eq29(X, Y, silent=True, frac=1):
+def diff_KL_w2009_eq29(X, Y, silent=True, p=1):
     """
     This function is not accurate! Just a rough estimation when X and Y are very different! 
     PyTorch/Faiss implementation of the KL divergence from Wang 2009 eq. 29.
@@ -373,8 +373,8 @@ def diff_KL_w2009_eq29(X, Y, silent=True, frac=1):
     m = Y.shape[0]  # Y sample size
 
     # first determine epsilon(i)
-    dNN1_XX = torch.cdist(X, X).sort()
-    dNN1_XY = torch.cdist(X, Y).sort()
+    dNN1_XX = torch.cdist(X, X, p=p).sort()
+    dNN1_XY = torch.cdist(X, Y, p=p).sort()
 
     eps = torch.amax(torch.cat((dNN1_XX.values[:, 1:2], dNN1_XY.values[:, 0:1]), dim=1), 1) * 1.000001
     
@@ -407,74 +407,8 @@ def diff_KL_w2009_eq29(X, Y, silent=True, frac=1):
     if not silent:
         print('  digamma term = %f' % digamma_term)
 
+    # print('   KL =', d_corr + digamma_term + np.log(float(m)/float(n-1)))
     # l_i, k_i, rho_i, nu_i
-    return d_corr + digamma_term + np.log(float(m)/float(n-1))
-
-
-def KL_w2009_eq29(X, Y, silent=True):
-    """
-    PyTorch/Faiss implementation of the KL divergence from Wang 2009 eq. 29.
-
-    kNN KL divergence estimate using Eq. 29 from Wang et al. (2009). 
-    This has some bias reduction applied to it and a correction for 
-    epsilon.
-
-    Sources 
-    ------- 
-    - Q. Wang, S. Kulkarni, & S. Verdu (2009). Divergence Estimation for Multidimensional Densities Via k-Nearest-Neighbor Distances. IEEE Transactions on Information Theory, 55(5), 2392-2405.
-    """
-    import faiss
-
-    if torch.is_tensor(X):
-        X = X.cpu().detach().numpy()
-    if torch.is_tensor(Y):
-        Y = Y.cpu().detach().numpy()
-
-    assert X.shape[1] == Y.shape[1]
-    n, d = X.shape  # X sample size, dimensions
-    m = Y.shape[0]  # Y sample size
-
-    # first determine epsilon(i)
-    NN_X = faiss.IndexFlatL2(d)   # build the index
-    NN_X.add(X)                  # add vectors to the index
-    NN_Y = faiss.IndexFlatL2(d)   # build the index
-    NN_Y.add(Y)                  # add vectors to the index
-    dNN1_XX, _ = NN_X.search(X, 2)
-    dNN1_XY, _ = NN_Y.search(X, 1)
-    eps = np.amax([np.sqrt(dNN1_XX[:, 1]), np.sqrt(
-        dNN1_XY[:, 0])], axis=0) * 1.000001
-    eps = eps.astype('float64')
-    if not silent:
-        print('  epsilons ', eps)
-
-    # find l_i and k_i
-    l_i = np.empty(n, dtype=int)
-    k_i = np.empty(n, dtype=int)
-    rho_i = np.empty(n, dtype=float)
-    nu_i = np.empty(n, dtype=float)
-    for i, e in enumerate(eps):
-        _, dist, index = NN_X.range_search(X[i:i+1], e**2)
-        l_i[i] = len(index) - 1
-        rho_i[i] = np.sqrt(np.max(dist)) if len(index) > 0 else 0
-
-        _, dist, index = NN_Y.range_search(X[i:i+1], e**2)
-        k_i[i] = len(index)
-        nu_i[i] = np.sqrt(np.max(dist)) if len(index) > 0 else 0
-
-    assert np.min(l_i) > 0
-    assert np.min(k_i) > 0
-    if not silent:
-        print('  l_i ', l_i)
-        print('  k_i ', k_i)
-
-    assert rho_i.min() > 0., 'duplicate elements in your chain'
-
-    d_corr = float(d) / float(n) * np.sum(np.log(nu_i/rho_i))
-    if not silent:
-        print('  first term = %f' % d_corr)
-    digamma_term = np.sum(digamma(l_i) - digamma(k_i)) / float(n)
-    if not silent:
-        print('  digamma term = %f' % digamma_term)
     return d_corr + digamma_term + np.log(float(m)/float(n-1))
 
 

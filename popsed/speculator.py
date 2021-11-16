@@ -52,7 +52,7 @@ class StandardScaler:
             device = self.device
 
         if torch.is_tensor(values):
-            return (values - Tensor(self.mean).to(device)) / Tensor(self.std + self.epsilon).to(device)
+            return (values - self.mean) / (self.std + self.epsilon).to(device)
         else:
             return (values - self.mean) / (self.std + self.epsilon)
 
