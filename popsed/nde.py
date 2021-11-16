@@ -5,6 +5,7 @@ But here everything is not conditioned.
 '''
 import torch
 from torch import nn, Tensor, optim
+import torch.nn.functional as F
 
 from nflows import flows, transforms
 from nflows.nn import nets
@@ -359,60 +360,50 @@ def diff_KL_w2009_eq29(X, Y, silent=True, frac=1):
     ------- 
     - Q. Wang, S. Kulkarni, & S. Verdu (2009). Divergence Estimation for Multidimensional Densities Via k-Nearest-Neighbor Distances. IEEE Transactions on Information Theory, 55(5), 2392-2405.
     """
-    import faiss
-    import faiss.contrib.torch_utils
+    # import faiss
+    # import faiss.contrib.torch_utils
 
-    # if not torch.is_tensor(X):
-    #     raise ValueError('The input X must be tensor.')
-    # if not torch.is_tensor(Y):
-    #     raise ValueError('The input Y must be tensor.')
+    if not torch.is_tensor(X):
+        raise ValueError('The input X must be tensor.')
+    if not torch.is_tensor(Y):
+        raise ValueError('The input Y must be tensor.')
 
     assert X.shape[1] == Y.shape[1]
     n, d = X.shape  # X sample size, dimensions
     m = Y.shape[0]  # Y sample size
 
     # first determine epsilon(i)
-    NN_X = faiss.IndexFlatL2(d)   # build the index
-    NN_X.add(X)                  # add vectors to the index
-    NN_Y = faiss.IndexFlatL2(d)   # build the index
-    NN_Y.add(Y)                  # add vectors to the index
-    dNN1_XX, _ = NN_X.search(X, int(frac * n))
-    dNN1_XX = torch.sqrt(dNN1_XX[:, 1:])
+    dNN1_XX = torch.cdist(X, X).sort()
+    dNN1_XY = torch.cdist(X, Y).sort()
 
-    dNN1_XY, _ = NN_Y.search(X, int(frac * n))
-    dNN1_XY = torch.sqrt(dNN1_XY)
-
-    eps = torch.amax(
-        torch.cat((dNN1_XX[:, 0:1], dNN1_XY[:, 0:1]), dim=1), 1) * 1.000001
-    eps = eps.type(torch.float64)
+    eps = torch.amax(torch.cat((dNN1_XX.values[:, 1:2], dNN1_XY.values[:, 0:1]), dim=1), 1) * 1.000001
+    
     if not silent:
         print('  epsilons ', eps)
 
     # find l_i and k_i, fast now
-    l_i = torch.empty(n, dtype=int)
-    k_i = torch.empty(n, dtype=int)
-    rho_i = torch.empty(n, dtype=float)
-    nu_i = torch.empty(n, dtype=float)
-
-    for i, e in enumerate(eps):
-        l_i[i] = torch.sum(dNN1_XX[i:i+1] <= e)
-        rho_i[i] = dNN1_XX[i:i+1][0][l_i[i] - 1]
-
-        k_i[i] = torch.sum(dNN1_XY[i:i+1] <= e)
-        nu_i[i] = dNN1_XY[i:i+1][0][k_i[i] - 1]
-
+    res = eps[:, None] - dNN1_XX.values
+    mask = F.threshold(-F.threshold(res, 0., 0.), -1e-9, 1)
+    l_i = torch.sum(mask, dim=1) - 1
+    rho_i = torch.amax(torch.mul(dNN1_XX.values, mask), dim=1)
+    
+    res = eps[:, None] - dNN1_XY.values
+    mask = F.threshold(-F.threshold(res, 0., 0.), -1e-9, 1)
+    k_i = torch.sum(mask, dim=1)
+    nu_i = torch.amax(torch.mul(dNN1_XY.values, mask), dim=1)
+    
     if not silent:
         print('  l_i ', l_i)
         print('  k_i ', k_i)
 
     assert rho_i.min() >= 0., 'duplicate elements in your chain'
 
-    mask = ~torch.isinf(torch.log(rho_i / nu_i))
-    d_corr = d / n * torch.nansum(torch.log(rho_i / nu_i)[mask])
+    #mask = ~torch.isinf(torch.log(rho_i / nu_i))
+    d_corr = -d / n * torch.nansum(torch.log(rho_i / nu_i)) # 
 
     if not silent:
         print('  first term = %f' % d_corr)
-    digamma_term = torch.sum(digamma(l_i) - digamma(k_i)) / n
+    digamma_term = torch.sum(torch.digamma(l_i) - torch.digamma(k_i)) / n
     if not silent:
         print('  digamma term = %f' % digamma_term)
 
