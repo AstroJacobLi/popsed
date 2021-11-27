@@ -16,6 +16,8 @@ from torch.nn.parameter import Parameter
 from torch.utils.data import TensorDataset, DataLoader
 from torchinterp1d import Interp1d
 
+from scipy.interpolate import interp1d
+
 from sedpy import observate
 # from sklearn.preprocessing import StandardScaler
 
@@ -296,6 +298,8 @@ class Speculator():
                 Stellar mass is asssumed to be 1 M_sun.
             val_frac (float): fraction of the data to be used for validation.
             batch_size (int): batch size for training.
+            wave_rest: restframe wavelength of the spectrum data. Default is `torch.arange(3000, 11000, 2)`.
+            wave_obs: observed wavelength of the spectrum data. Default is `torch.arange(3000, 11000, 2)`.
         """
         # Normalize PCA coefficients
         self.pca_scaler.fit(pca_coeff)  # scale PCA coefficients
@@ -432,7 +436,8 @@ class Speculator():
         plt.ylabel('Loss')
 
     def transform(self, spectrum_restframe, z):
-        """Redshift a spectrum.
+        """Redshift a spectrum. Linear interpolation is used. 
+        Values outside the interpolation range are linearly interpolated.
 
         Args:
             spectrum_restframe (torch.Tensor): restframe spectrum, shape = (n_wavelength, n_samples).
@@ -450,6 +455,10 @@ class Speculator():
     def predict(self, params):
         """
         Predict the PCA coefficients of the spectrum, given physical parameters.
+        Note: this is in restframe, and the spectrum is scaled to 1 M_sun.
+
+        Args:
+            params (torch.Tensor): physical parameters, shape = (n_samples, n_params).
         """
         if not torch.is_tensor(params):
             params = torch.Tensor(params).to(self.device)
@@ -464,6 +473,14 @@ class Speculator():
     def predict_spec(self, params, stellar_mass=None, redshift=None):
         """
         Predict corresponding spectrum (in linear scale), given physical parameters.
+
+        Args:
+            params (torch.Tensor): physical parameters, shape = (n_samples, n_params).
+            stellar_mass (torch.Tensor, or numpy array): stellar mass of each spectrum, shape = (n_samples).
+            redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
+
+        Returns:
+            spec (torch.Tensor): predicted spectrum, shape = (n_wavelength, n_samples).
         """
         pca_coeff = self.predict(params)  # Assuming 1 M_sun.
         log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
@@ -476,6 +493,8 @@ class Speculator():
             log_spec += torch.log10(stellar_mass)
 
         spec = 10**log_spec
+        # such that interpolation will not do linear extrapolation.
+        spec[:, 0] = torch.nan
         if redshift is not None:
             spec = self.transform(spec, redshift)
 
@@ -489,29 +508,72 @@ class Speculator():
 
     #     return spec
 
-    def predict_mag(self, params, stellar_mass=None, redshift=0.0,
-                    filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
-                    angstroms=np.arange(3000, 11000, 2)):
+    def _calc_transmission(self, filterset):
+        """Interploate transmission curves to `self.wave_obs`.
+        The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
+        And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
+
+        Args:
+            filterset (list of string): names of filters, e.g., ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
+        """
+        x = self.wave_obs.cpu().detach().numpy()
+
+        # transmission efficiency
+        _epsilon = np.zeros((len(filterset), len(x)))
+        _zero_counts = np.zeros(len(filterset))
+        filters = observate.load_filters(filterset)
+        for i in range(len(filterset)):
+            _epsilon[i] = interp1d(filters[i].wavelength,
+                                   filters[i].transmission,
+                                   bounds_error=False,
+                                   fill_value=0)(x)
+            _zero_counts[i] = filters[i].ab_zero_counts
+        self.filterset = filterset
+        self.transmission_effiency = Tensor(_epsilon).to(self.device)
+        self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
+
+    def predict_mag(self, params, stellar_mass=None, redshift=None,
+                    filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
         '''
         Predict magnitudes for a given set of filters, based on the predicted spectrum. SLOW!
         See https://github.com/bd-j/prospector/blob/dda730feef5b8e679864521d0ac1c5f5f3db989c/prospect/models/sedmodel.py#L591
+        and also https://github.com/pmelchior/spectrum-encoder/blob/e817fbd3bef2a3a829ea289d4b6bef41265ad60d/model.py#L255-L257.
 
         Parameters:
+            params (torch.Tensor): physical parameters, shape = (n_samples, n_params).
+            stellar_mass (torch.Tensor, or numpy array): stellar mass of each spectrum, shape = (n_samples).
+            redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
             filterset (list): list of filters to predict, default = ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
-            angstroms (array): wavelength array, default = np.arange(3000, 11000, 2).
+
+        Returns:
+            mags (torch.Tensor): predicted magnitudes, shape = (n_samples, n_filters).
         '''
+        if hasattr(self, 'filterset') and self.filterset != filterset:
+            self.filterset = filterset
+            self._calc_transmission(filterset)
+        elif hasattr(self, 'filterset') and self.filterset == filterset:
+            # Don't interpolate transmission efficiency again.
+            pass
+        elif hasattr(self, 'filterset') is False:
+            self._calc_transmission(filterset)
+
         # get magnitude from a spectrum
         lightspeed = 2.998e18  # AA/s
         jansky_cgs = 1e-23
 
-        f_maggies = 10**self.predict_spec(params,
-                                          stellar_mass=stellar_mass).cpu().detach().numpy()
-        f_lambda_cgs = f_maggies * lightspeed / \
-            angstroms**2 * (3631 * jansky_cgs)
-        filterlist = observate.load_filters(filterset)
-        mags = observate.getSED(angstroms, f_lambda_cgs, filterlist=filterlist)
+        _spec = self.predict_spec(params,
+                                  stellar_mass=stellar_mass,
+                                  redshift=redshift)
 
-        return Tensor(mags).to(self.device)
+        _spec *= lightspeed / self.wave_obs**2 * \
+            (3631 * jansky_cgs)  # in cgs/AA units
+        _spec = torch.nan_to_num(_spec, 0.0)
+
+        maggies = torch.trapezoid(
+            ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
+        mags = -2.5 * torch.log10(maggies)
+
+        return mags
 
     def save_model(self, filename):
         with open(filename, 'wb') as f:
