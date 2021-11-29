@@ -405,18 +405,18 @@ class Speculator():
 
             if epoch_loss < min_loss:
                 min_loss = epoch_loss
-                self.save_model('best_loss_model.pkl')
+                self.save_model('speculator_best_loss_model.pkl')
                 self.best_loss_epoch = epoch
 
             for x, y in self.dataloaders['val']:
-                spec = self.predict_spec(x)
+                spec = torch.log10(self.predict_spec(x))
                 spec_y = self.predict_spec_from_norm_pca(y)
 
-            recon_err = torch.median(
+            recon_err = torch.nanmedian(
                 torch.abs((spec - spec_y) / torch.abs(spec_y)))
             if recon_err < min_recon_err:
                 min_recon_err = recon_err
-                self.save_model('best_recon_err_model.pkl')
+                self.save_model('speculator_best_recon_model.pkl')
                 self.best_recon_err_epoch = epoch
 
         if display:
@@ -500,13 +500,36 @@ class Speculator():
 
         return spec
 
-    # def predict_spec_from_norm_pca(self, y):
-    #     pca_coeff = self.pca_scaler.inverse_transform(
-    #         y.to(self.device), device=self.device)
-    #     spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
-    #         pca_coeff, device=self.device), device=self.device)
+    def _predict_spec_with_mass(self, params, redshift=None):
+        """
+        Predict corresponding spectrum (in linear scale), given physical parameters.
 
-    #     return spec
+        Args:
+            params (torch.Tensor): physical parameters, including mass. shape = (n_samples, n_params).
+            redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
+
+        Returns:
+            spec (torch.Tensor): predicted spectrum, shape = (n_wavelength, n_samples).
+        """
+        pca_coeff = self.predict(params[:, :-1])  # Assuming 1 M_sun.
+        log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
+            pca_coeff, device=self.device), device=self.device) + params[:, -1:]  # log_spectrum
+
+        spec = 10 ** log_spec  # torch.pow(10, log_spec)  # 10**log_spec
+        # such that interpolation will not do linear extrapolation.
+        # if redshift is not None:
+        #spec[:, 0] = torch.nan
+        #spec = self.transform(spec, redshift)
+
+        return spec
+
+    def predict_spec_from_norm_pca(self, y):
+        pca_coeff = self.pca_scaler.inverse_transform(
+            y.to(self.device), device=self.device)
+        spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
+            pca_coeff, device=self.device), device=self.device)
+
+        return spec
 
     def _calc_transmission(self, filterset):
         """Interploate transmission curves to `self.wave_obs`.
@@ -568,6 +591,35 @@ class Speculator():
         _spec *= lightspeed / self.wave_obs**2 * \
             (3631 * jansky_cgs)  # in cgs/AA units
         _spec = torch.nan_to_num(_spec, 0.0)
+
+        maggies = torch.trapezoid(
+            ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
+        mags = -2.5 * torch.log10(maggies)
+
+        return mags
+
+    def _predict_mag_with_mass(self, params, redshift=None,
+                               filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
+        '''
+        Now params contain stellar mass, in the last column.
+        '''
+        if hasattr(self, 'filterset') and self.filterset != filterset:
+            self.filterset = filterset
+            self._calc_transmission(filterset)
+        elif hasattr(self, 'filterset') and self.filterset == filterset:
+            # Don't interpolate transmission efficiency again.
+            pass
+        elif hasattr(self, 'filterset') is False:
+            self._calc_transmission(filterset)
+
+        # get magnitude from a spectrum
+        lightspeed = 2.998e18  # AA/s
+        jansky_cgs = 1e-23
+
+        _spec = self._predict_spec_with_mass(
+            params, redshift=redshift) * lightspeed / self.wave_obs**2 * (3631 * jansky_cgs)  # in cgs/AA units
+
+        #_spec = torch.nan_to_num(_spec, 0.0)
 
         maggies = torch.trapezoid(
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
