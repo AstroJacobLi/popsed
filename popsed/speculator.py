@@ -471,13 +471,14 @@ class Speculator():
 
         return pca_coeff
 
-    def predict_spec(self, params, stellar_mass=None, redshift=None):
+    def predict_spec(self, params, log_stellar_mass=None, redshift=None):
         """
         Predict corresponding spectrum (in linear scale), given physical parameters.
 
         Args:
-            params (torch.Tensor): physical parameters, shape = (n_samples, n_params).
-            stellar_mass (torch.Tensor, or numpy array): stellar mass of each spectrum, shape = (n_samples).
+            params (torch.Tensor): physical parameters (not including stellar mass and redshift), 
+                shape = (n_samples, n_params).
+            log_stellar_mass (torch.Tensor, or numpy array): log10 stellar mass of each spectrum, shape = (n_samples).
             redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
 
         Returns:
@@ -487,11 +488,11 @@ class Speculator():
         log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
             pca_coeff, device=self.device), device=self.device)  # log_spectrum
 
-        if stellar_mass is not None:
-            if not torch.is_tensor(stellar_mass):
-                stellar_mass = torch.Tensor(
-                    stellar_mass.reshape(-1, 1)).to(self.device)
-            log_spec += torch.log10(stellar_mass)
+        if log_stellar_mass is not None:
+            if not torch.is_tensor(log_stellar_mass):
+                log_stellar_mass = torch.Tensor(
+                    log_stellar_mass.reshape(-1, 1)).to(self.device)
+            log_spec += log_stellar_mass
 
         spec = 10**log_spec
         # such that interpolation will not do linear extrapolation.
@@ -505,37 +506,31 @@ class Speculator():
         """
         Predict corresponding spectrum (in linear scale), given physical parameters.
 
-            params[:, :-1] are the physical parameters.
-            params[:, -1:] is the stellar mass.
-
         Args:
             params (torch.Tensor): physical parameters, including mass. shape = (n_samples, n_params).
+                params[:, :-1] are the physical parameters.
+                params[:, -1:] is the log10 stellar mass.
 
         Returns:
             spec (torch.Tensor): predicted spectrum, shape = (n_wavelength, n_samples).
         """
-        pca_coeff = self.predict(params[:, :-1])  # Assuming 1 M_sun.
+        pca_coeff = self.predict(params[:, :-1])  # Assuming 1 M_sun and z=0.0.
         log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
             pca_coeff, device=self.device), device=self.device) + params[:, -1:]  # log_spectrum
 
-        spec = 10 ** log_spec  # torch.pow(10, log_spec)  # 10**log_spec
-        # such that interpolation will not do linear extrapolation.
-        # if redshift is not None:
-        #spec[:, 0] = torch.nan
-        #spec = self.transform(spec, redshift)
+        spec = 10 ** log_spec
 
         return spec
 
     def _predict_spec_with_mass_redshift(self, params):
         """
-        Predict corresponding spectrum (in linear scale), given physical parameters.
-
-            params[:, :-2] are the physical parameters.
-            params[:, -2:-1] is the stellar mass.
-            params[:, -1:] is the redshift.
+        Predict corresponding spectrum (in linear scale), given physical parameters, stellar mass, and redshift..
 
         Args:
             params (torch.Tensor): physical parameters, including mass. shape = (n_samples, n_params).
+                params[:, :-2] are the physical parameters (not including stellar mass and redshift).
+                params[:, -2:-1] is the log10 stellar mass.
+                params[:, -1:] is the redshift.
 
         Returns:
             spec (torch.Tensor): predicted spectrum, shape = (n_wavelength, n_samples).
@@ -546,7 +541,7 @@ class Speculator():
 
         spec = 10 ** log_spec
         # such that interpolation will not do linear extrapolation.
-        #spec[:, 0] = torch.nan
+        # spec[:, 0] = 0.0  # torch.nan
         spec = self.transform(spec, params[:, -1])
 
         return spec
@@ -583,7 +578,7 @@ class Speculator():
         self.transmission_effiency = Tensor(_epsilon).to(self.device)
         self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 
-    def predict_mag(self, params, stellar_mass=None, redshift=None,
+    def predict_mag(self, params, log_stellar_mass=None, redshift=None,
                     filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
         '''
         Predict magnitudes for a given set of filters, based on the predicted spectrum. SLOW!
@@ -592,7 +587,7 @@ class Speculator():
 
         Parameters:
             params (torch.Tensor): physical parameters, shape = (n_samples, n_params).
-            stellar_mass (torch.Tensor, or numpy array): stellar mass of each spectrum, shape = (n_samples).
+            log_stellar_mass (torch.Tensor, or numpy array): log10 stellar mass of each spectrum, shape = (n_samples).
             redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
             filterset (list): list of filters to predict, default = ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
 
@@ -613,7 +608,7 @@ class Speculator():
         jansky_cgs = 1e-23
 
         _spec = self.predict_spec(params,
-                                  stellar_mass=stellar_mass,
+                                  log_stellar_mass=log_stellar_mass,
                                   redshift=redshift)
 
         _spec *= lightspeed / self.wave_obs**2 * \
@@ -627,9 +622,19 @@ class Speculator():
         return mags
 
     def _predict_mag_with_mass(self, params, filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
-        '''
-        Now params contain stellar mass, in the last column.
-        '''
+        """
+        Predict corresponding photometry (in magnitude), given physical parameters, stellar mass.
+        Assuming redshift = 0.0.
+
+        Args:
+            params (torch.Tensor): physical parameters, including mass. shape = (n_samples, n_params).
+                params[:, :-1] are the physical parameters (not including stellar mass).
+                params[:, -1:] is the log10 stellar mass.
+            filterset (list): list of filters to predict, default = ['sdss_{0}0'.format(b) for b in 'ugriz'].
+
+        Returns:
+            mags (torch.Tensor): predicted photometry, shape = (n_bands, n_samples).
+        """
         if hasattr(self, 'filterset') and self.filterset != filterset:
             self.filterset = filterset
             self._calc_transmission(filterset)
@@ -655,9 +660,20 @@ class Speculator():
         return mags
 
     def _predict_mag_with_mass_redshift(self, params, filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
-        '''
-        Now params contain stellar mass, in the last column.
-        '''
+        """
+        Predict corresponding photometry (in magnitude), given physical parameters, stellar mass, and redshift.
+
+        Args:
+            params (torch.Tensor): physical parameters, including mass. shape = (n_samples, n_params).
+                params[:, :-2] are the physical parameters (not including stellar mass and redshift).
+                params[:, -2:-1] is the log10 stellar mass.
+                params[:, -1:] is the redshift.
+
+            filterset (list): list of filters to predict, default = ['sdss_{0}0'.format(b) for b in 'ugriz'].
+
+        Returns:
+            mags (torch.Tensor): predicted photometry, shape = (n_bands, n_samples).
+        """
         if hasattr(self, 'filterset') and self.filterset != filterset:
             self.filterset = filterset
             self._calc_transmission(filterset)
@@ -674,7 +690,7 @@ class Speculator():
         _spec = self._predict_spec_with_mass_redshift(
             params) * lightspeed / self.wave_obs**2 * (3631 * jansky_cgs)  # in cgs/AA units
 
-        #_spec = torch.nan_to_num(_spec, 0.0)
+        _spec = torch.nan_to_num(_spec, 0.0)
 
         maggies = torch.trapezoid(
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
