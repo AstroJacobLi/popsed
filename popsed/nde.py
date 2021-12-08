@@ -15,6 +15,7 @@ from sbi.utils.sbiutils import standardizing_transform
 from sbi.utils.torchutils import create_alternating_binary_mask
 
 import copy
+import os
 from tqdm import trange
 import pickle
 import numpy as np
@@ -370,6 +371,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             num_transforms: int = 5,
             num_bins: int = 10,
             embedding_net: nn.Module = nn.Identity(),
+            output_dir='./nde_theta/',
             **kwargs):
         """
         Initialize Wasserstein Neural Density Estimator.
@@ -382,6 +384,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             embedding_net: Optional embedding network for y.
             kwargs: Additional arguments that are passed by the build function but are not
                 relevant for maf and are therefore ignored.
+            output_dir (str): output directory for the trained model.
         """
         super(WassersteinNeuralDensityEstimator, self).__init__(
             normalize=normalize,
@@ -397,6 +400,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         self.best_loss_epoch = 0
         self.index = np.random.randint(0, 1000)
         # Used to identify the model
+        self.output_dir = output_dir
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
 
     def build(self, batch_theta: Tensor, batch_X: Tensor, 
               optimizer: str = "adam", 
@@ -457,7 +463,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                 # Don't save model too frequently
                 self.best_loss_epoch = len(self.train_loss_history)
                 self.best_model = copy.deepcopy(self)
-                self.save_model(f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
+                self.save_model(
+                    os.path.join(self.output_dir, 
+                                 f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
+                    )
 
     def goodness_of_fit(self, Y_truth):
         samples = self.sample(len(Y_truth))
