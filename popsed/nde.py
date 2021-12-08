@@ -14,6 +14,7 @@ from nflows import distributions as distributions_
 from sbi.utils.sbiutils import standardizing_transform
 from sbi.utils.torchutils import create_alternating_binary_mask
 
+import copy
 from tqdm import trange
 import pickle
 import numpy as np
@@ -21,6 +22,8 @@ import numpy as np
 from scipy.linalg import sqrtm
 from scipy.special import digamma
 from sklearn.neighbors import NearestNeighbors
+from popsed.speculator import StandardScaler
+from geomloss import SamplesLoss
 
 
 def build_maf(
@@ -168,7 +171,7 @@ def build_nsf(
             in_features, out_features, hidden_features, context_features=None
         )
         if num_transforms > 1:
-            warn(
+            raise Warning(
                 f"You are using `num_transforms={num_transforms}`. When estimating a "
                 f"1D density, you will not get any performance increase by using "
                 f"multiple transforms with NSF. We recommend setting "
@@ -234,7 +237,7 @@ class NeuralDensityEstimator(object):
             hidden_features: int = 50,
             num_transforms: int = 5,
             num_bins: int = 10,
-            embedding_net: nn.Module = nn.Identity(),
+            embedding_net: nn.Module = nn.Identity(), 
             **kwargs):
         """
         Initialize neural density estimator.
@@ -258,17 +261,24 @@ class NeuralDensityEstimator(object):
         self.embedding_net = embedding_net
         self.train_loss_history = []
 
-    def build(self, batch_x: Tensor, optimizer: str = "adam", lr=0.001, **kwargs):
+    def build(self, batch_theta: Tensor, optimizer: str = "adam", 
+              lr=1e-3, **kwargs):
         """
         Build the neural density estimator based on input data.
+        
+        Args:
+            batch_theta (torch.Tensor): the input data whose distribution will be modeled by NDE.
+            optimizer (float): the optimizer to use for training, default is Adam.
+            lr (float): learning rate for the optimizer.
+            
         """
-        if not torch.is_tensor(batch_x):
-            batch_x = torch.tensor(batch_x, device=self.device)
-        self.batch_x = batch_x
+        if not torch.is_tensor(batch_theta):
+            batch_theta = torch.tensor(batch_theta, device=self.device)
+        self.batch_theta = batch_theta
 
         if self.method == "maf":
             self.net = build_maf(
-                batch_x=batch_x,
+                batch_x=batch_theta,
                 z_score_x=self.normalize,
                 hidden_features=self.hidden_features,
                 num_transforms=self.num_transforms,
@@ -278,7 +288,7 @@ class NeuralDensityEstimator(object):
             )
         elif self.method == "nsf":
             self.net = build_nsf(
-                batch_x=batch_x,
+                batch_x=batch_theta,
                 z_score_x=self.normalize,
                 hidden_features=self.hidden_features,
                 num_transforms=self.num_transforms,
@@ -336,7 +346,7 @@ class NeuralDensityEstimator(object):
         import matplotlib.pyplot as plt
         plt.plot(np.array(self.train_loss_history).flatten(), label='Train loss')
         plt.xlabel('Epoch')
-        plt.ylabel(r'Loss = $-\sum\log(P)$')
+        plt.ylabel('Loss')
 
     def save_model(self, filename):
         with open(filename, 'wb') as f:
@@ -346,6 +356,114 @@ class NeuralDensityEstimator(object):
         with open(filename, 'rb') as f:
             self = pickle.load(f)
 
+
+class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
+    """
+    Wasserstein Neural Density Estimator, trained based on given data.
+    """
+    
+    def __init__(
+            self,
+            normalize: bool = True,
+            method: str = "nsf",
+            hidden_features: int = 50,
+            num_transforms: int = 5,
+            num_bins: int = 10,
+            embedding_net: nn.Module = nn.Identity(),
+            **kwargs):
+        """
+        Initialize Wasserstein Neural Density Estimator.
+        Args:
+            normalize: Whether to z-score the data.
+            method: Method to use for density estimation, either 'nsf' or 'maf'.
+            hidden_features: Number of hidden features.
+            num_transforms: Number of transforms.
+            num_bins: Number of bins used for the splines.
+            embedding_net: Optional embedding network for y.
+            kwargs: Additional arguments that are passed by the build function but are not
+                relevant for maf and are therefore ignored.
+        """
+        super(WassersteinNeuralDensityEstimator, self).__init__(
+            normalize=normalize,
+            method=method,
+            hidden_features=hidden_features,
+            num_transforms=num_transforms,
+            num_bins=num_bins,
+            embedding_net=embedding_net,
+            **kwargs
+        )
+        self.patience = 5
+        self.min_loss = -1
+        self.best_loss_epoch = 0
+        self.index = np.random.randint(0, 1000)
+        # Used to identify the model
+
+    def build(self, batch_theta: Tensor, batch_X: Tensor, 
+              optimizer: str = "adam", 
+              lr=1e-3, **kwargs):
+        """
+        Build the neural density estimator based on input data.
+        
+        Args:
+            batch_theta (torch.Tensor): the stellar population parameters. 
+                Basically, we only need the shapes and (mean, std) of `batch_theta`. 
+            batch_X (torch.Tensor): the observed SEDs, to compare with the predicted SEDs. 
+            optimizer (float): the optimizer to use for training, default is Adam.
+            lr (float): learning rate for the optimizer.
+        
+        """
+        super().build(batch_theta, optimizer, lr, **kwargs)
+        
+        scaler = StandardScaler(device=self.device)
+        scaler.fit(batch_X)
+        self.scaler = scaler
+        self.X = scaler.transform(batch_X) # z-scored observed SEDs
+
+    
+    def train(self, 
+              n_epochs: int = 100, n_samples=5000, lr=1e-3,
+              speculator=None, noise=True, SNR=20,
+              sinkhorn_kwargs={'p': 2, 'blur': 0.01, 'scaling': 0.8}, 
+              suffix: str = "nde"):
+        """
+        Train the neural density estimator using Wasserstein loss.
+        """
+        # Define a Sinkhorn (~Wasserstein) loss between sampled measures
+        L = SamplesLoss(loss="sinkhorn", **sinkhorn_kwargs)
+        # Change learning rate
+        self.optimizer.param_groups[0]['lr'] = lr
+        
+        t = trange(n_epochs, 
+                   desc='Training NDE_theta using Wasserstein loss', 
+                   unit='epochs')
+        
+        for epoch in t:
+            self.optimizer.zero_grad()
+            Y = self.scaler.transform(
+                speculator._predict_mag_with_mass_redshift(
+                self.sample(n_samples), noise=noise, SNR=SNR)
+                )
+            Y = torch.nan_to_num(Y, 0.0)
+            loss = torch.log10(L(self.X, Y))
+            loss.backward()
+            self.optimizer.step()
+            self.train_loss_history.append(loss.item())
+            t.set_description(f'Loss = {loss.item():.3f}')
+
+            # Save the model if the loss is the best so far
+            if loss.item() < self.min_loss:
+                # epoch - self.best_loss_epoch > self.patience and 
+                self.min_loss = loss.item()
+                # Don't save model too frequently
+                self.best_loss_epoch = len(self.train_loss_history)
+                self.best_model = copy.deepcopy(self)
+                self.save_model(f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
+
+    def goodness_of_fit(self, Y_truth):
+        samples = self.sample(len(Y_truth))
+        L = SamplesLoss(loss="sinkhorn", p=2, blur=0.001, scaling=0.95) # very close to Wasserstein loss
+        self._goodness_of_fit = np.log10(L(Y_truth, samples).item()) # The distance in theta space
+        print('Log10 Wasserstein distance in theta space: ', self._goodness_of_fit)
 
 def diff_KL_w2009_eq29(X, Y, silent=True, p=1):
     """
