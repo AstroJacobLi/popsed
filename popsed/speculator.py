@@ -579,7 +579,8 @@ class Speculator():
         self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 
     def predict_mag(self, params, log_stellar_mass=None, redshift=None,
-                    filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
+                    filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
+                    noise=False, SNR=10,):
         '''
         Predict magnitudes for a given set of filters, based on the predicted spectrum. SLOW!
         See https://github.com/bd-j/prospector/blob/dda730feef5b8e679864521d0ac1c5f5f3db989c/prospect/models/sedmodel.py#L591
@@ -590,7 +591,9 @@ class Speculator():
             log_stellar_mass (torch.Tensor, or numpy array): log10 stellar mass of each spectrum, shape = (n_samples).
             redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
             filterset (list): list of filters to predict, default = ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
-
+            nosie (bool): whether to add noise to the predicted photometry.
+            SNR (float): signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry)
+            
         Returns:
             mags (torch.Tensor): predicted magnitudes, shape = (n_samples, n_filters).
         '''
@@ -617,8 +620,15 @@ class Speculator():
 
         maggies = torch.trapezoid(
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
+        if noise is True:
+            _noise = torch.randn_like(maggies) * maggies / SNR
+            _noise[(maggies + _noise) < 0] = 0.0
+            maggies += _noise
+        
         mags = -2.5 * torch.log10(maggies)
-
+        # if noise is True:
+        #     mags += torch.randn_like(mags) * 0.1
+        
         return mags
 
     def _predict_mag_with_mass(self, params, filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
@@ -659,7 +669,9 @@ class Speculator():
 
         return mags
 
-    def _predict_mag_with_mass_redshift(self, params, filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
+    def _predict_mag_with_mass_redshift(self, params, 
+                                        filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
+                                        noise=True, SNR=10):
         """
         Predict corresponding photometry (in magnitude), given physical parameters, stellar mass, and redshift.
 
@@ -670,6 +682,8 @@ class Speculator():
                 params[:, -1:] is the redshift.
 
             filterset (list): list of filters to predict, default = ['sdss_{0}0'.format(b) for b in 'ugriz'].
+            nosie (bool): whether to add noise to the predicted photometry.
+            SNR (float): signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry)
 
         Returns:
             mags (torch.Tensor): predicted photometry, shape = (n_bands, n_samples).
@@ -694,6 +708,11 @@ class Speculator():
 
         maggies = torch.trapezoid(
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
+        if noise is True:
+            _noise = torch.randn_like(maggies) * maggies / SNR
+            _noise[(maggies + _noise) < 0] = 0.0
+            maggies += _noise
+                
         mags = -2.5 * torch.log10(maggies)
 
         return mags
