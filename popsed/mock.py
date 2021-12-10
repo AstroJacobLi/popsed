@@ -1,5 +1,6 @@
 """
 This file contains functions to generate mock SED/spectrum, i.e., the forward model.
+From 
 """
 from copy import deepcopy
 import numpy as np
@@ -50,19 +51,26 @@ def build_model(uniform_priors=False, add_neb=False, add_duste=False, add_dustab
             model_params["duste_qpah"]["isfree"] = True
             model_params["duste_umin"]["isfree"] = True
             model_params["duste_alpha"]["isfree"] = True
+            model_params["fagn"]["isfree"] = True
+            model_params["agn_tau"]["isfree"] = True
 
     if add_dustabs:
-        # --- Complexify dust attenuation ---
-        # Switch to Kriek and Conroy 2013
-        model_params["dust_type"]["init"] = 4
-        # Slope of the attenuation curve, expressed as the index of the power-law
-        # that modifies the base Kriek & Conroy/Calzetti shape.
-        # I.e. a value of zero is basically calzetti with a 2175AA bump
-        model_params["dust_index"] = dict(N=1, isfree=False, init=0.0)
-        # young star dust
-        model_params["dust1"] = dict(N=1, isfree=False, init=0.0)
-        model_params["dust1_index"] = dict(N=1, isfree=False, init=-1.0)
-        model_params["dust_tesc"] = dict(N=1, isfree=False, init=7.0)
+         # Calzetti et al. (2000) attenuation curve
+        model_params["dust_type"]["init"] = 2
+        model_params["dust2"]["init"] = 0.0
+        model_params["dust2"]["prior"] = priors.TopHat(mini=-1, maxi=0.4)
+        
+        # # --- Complexify dust attenuation ---
+        # # Switch to Kriek and Conroy 2013
+        # model_params["dust_type"]["init"] = 4
+        # # Slope of the attenuation curve, expressed as the index of the power-law
+        # # that modifies the base Kriek & Conroy/Calzetti shape.
+        # # I.e. a value of zero is basically calzetti with a 2175AA bump
+        # model_params["dust_index"] = dict(N=1, isfree=False, init=0.0)
+        # # young star dust
+        # model_params["dust1"] = dict(N=1, isfree=False, init=0.0)
+        # model_params["dust1_index"] = dict(N=1, isfree=False, init=-1.0)
+        # model_params["dust_tesc"] = dict(N=1, isfree=False, init=7.0)
 
     # --- Add smoothing parameters ---
     if has_spectrum:
@@ -93,7 +101,7 @@ def build_model(uniform_priors=False, add_neb=False, add_duste=False, add_dustab
         model_params["mass"]["prior"] = priors.TopHat(
             mini=minit/10., maxi=minit*10)
 
-    model_params["logzsol"]["prior"] = priors.TopHat(mini=-1.5, maxi=0.2)
+    model_params["logzsol"]["prior"] = priors.TopHat(mini=-1.98, maxi=0.19) # should be a mass-dependent ClippedNormal
     tuniv = cosmo.age(z).to("Gyr").value
     model_params["tage"]["prior"] = priors.TopHat(mini=0.1, maxi=tuniv)
 
@@ -221,7 +229,7 @@ def build_obs(sps, model, dlambda_spec=2.0, wave_lo=3800, wave_hi=7000.,
               snr_spec=10., snr_phot=20., add_noise=True, seed=101,
               add_realism=False, mask_elines=False,
               continuum_optimize=False, **kwargs):
-    """Load a mock
+    """Build observation based on SPS and model. 
 
     :param wave_lo:
         The (restframe) minimum wavelength of the spectrum.

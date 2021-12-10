@@ -241,10 +241,6 @@ class Network(nn.Module):
                 setattr(self, 'layer_' + str(i),
                         FC(hidden_size[i-1], output_size))
 
-    def transform(self, spectrum_restframe, z):
-        wave_redshifted = (self.wave_rest.unsqueeze(1) * (1 + z)).T
-        return Interp1d()(wave_redshifted, spectrum_restframe, self.wave_obs)
-
     def forward(self, x):
         for i in range(0, self.n_layers + 1):
             x = getattr(self, 'layer_' + str(i))(x)
@@ -286,6 +282,22 @@ class Speculator():
 
         self.train_loss_history = []
         self.val_loss_history = []
+        
+        self._build_distance_interpolator()
+        
+    def _build_distance_interpolator(self):
+        """
+        Since the `astropy.cosmology` is not differentiable, we build a distance 
+        interpolator which allows us to calculate the luminosity distance at 
+        any given redshift in a differentiable way.
+        
+        Here the cosmology is WMAP9, consistent with `prospector`.
+        """
+        from prospect.sources.constants import cosmo #WMAP9
+        z_grid = torch.Tensor(np.arange(0, 5, 0.005))
+        dist_grid = torch.Tensor(cosmo.luminosity_distance(z_grid).value) # Mpc
+        self.z_grid = z_grid.to(self.device)
+        self.dist_grid = dist_grid.to(self.device)
 
     def load_data(self, pca_coeff, params, val_frac=0.2, batch_size=32,
                   wave_rest=torch.arange(3000, 11000, 2), wave_obs=torch.arange(3000, 11000, 2)):
@@ -451,7 +463,14 @@ class Speculator():
         z = z.squeeze()
 
         wave_redshifted = (self.wave_rest.unsqueeze(1) * (1 + z)).T
-        return Interp1d()(wave_redshifted, spectrum_restframe, self.wave_obs)
+        
+        distances = Interp1d()(self.z_grid, self.dist_grid, z)
+        dfactor = ((distances * 1e5)**2 / (1 + z))
+        
+        # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value 
+        # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
+        spec = Interp1d()(wave_redshifted, spectrum_restframe, self.wave_obs) / dfactor.T
+        return spec
 
     def predict(self, params):
         """

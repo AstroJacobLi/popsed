@@ -401,8 +401,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         self.index = np.random.randint(0, 1000)
         # Used to identify the model
         self.output_dir = output_dir
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
+        if (self.output_dir is not None):
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
 
     def build(self, batch_theta: Tensor, batch_X: Tensor, 
               optimizer: str = "adam", 
@@ -463,10 +464,11 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                 # Don't save model too frequently
                 self.best_loss_epoch = len(self.train_loss_history)
                 self.best_model = copy.deepcopy(self)
-                self.save_model(
-                    os.path.join(self.output_dir, 
-                                 f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
-                    )
+                if self.output_dir is not None:
+                    self.save_model(
+                        os.path.join(self.output_dir, 
+                                    f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
+                        )
 
     def goodness_of_fit(self, Y_truth):
         samples = self.sample(len(Y_truth))
