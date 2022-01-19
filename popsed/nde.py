@@ -52,7 +52,8 @@ def build_maf(
     x_numel = batch_x[0].numel()
 
     if x_numel == 1:
-        raise Warning(f"In one-dimensional output space, this flow is limited to Gaussians")
+        raise Warning(
+            f"In one-dimensional output space, this flow is limited to Gaussians")
 
     transform = transforms.CompositeTransform(
         [
@@ -238,7 +239,7 @@ class NeuralDensityEstimator(object):
             hidden_features: int = 50,
             num_transforms: int = 5,
             num_bins: int = 10,
-            embedding_net: nn.Module = nn.Identity(), 
+            embedding_net: nn.Module = nn.Identity(),
             **kwargs):
         """
         Initialize neural density estimator.
@@ -261,17 +262,18 @@ class NeuralDensityEstimator(object):
         self.normalize = normalize
         self.embedding_net = embedding_net
         self.train_loss_history = []
+        self.vali_loss_history = []
 
-    def build(self, batch_theta: Tensor, optimizer: str = "adam", 
+    def build(self, batch_theta: Tensor, optimizer: str = "adam",
               lr=1e-3, **kwargs):
         """
         Build the neural density estimator based on input data.
-        
+
         Args:
             batch_theta (torch.Tensor): the input data whose distribution will be modeled by NDE.
             optimizer (float): the optimizer to use for training, default is Adam.
             lr (float): learning rate for the optimizer.
-            
+
         """
         if not torch.is_tensor(batch_theta):
             batch_theta = torch.tensor(batch_theta, device=self.device)
@@ -346,8 +348,12 @@ class NeuralDensityEstimator(object):
     def plot_loss(self):
         import matplotlib.pyplot as plt
         plt.plot(np.array(self.train_loss_history).flatten(), label='Train loss')
+        if hasattr(self, 'vali_loss_history'):
+            plt.plot(np.array(self.vali_loss_history).flatten(),
+                     label='Validation loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
+        plt.legend()
 
     def save_model(self, filename):
         with open(filename, 'wb') as f:
@@ -362,7 +368,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
     """
     Wasserstein Neural Density Estimator, trained based on given data.
     """
-    
+
     def __init__(
             self,
             normalize: bool = True,
@@ -405,76 +411,100 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
 
-    def build(self, batch_theta: Tensor, batch_X: Tensor, 
-              optimizer: str = "adam", 
+    def build(self, batch_theta: Tensor, batch_X: Tensor,
+              optimizer: str = "adam",
               lr=1e-3, **kwargs):
         """
         Build the neural density estimator based on input data.
-        
+
         Args:
-            batch_theta (torch.Tensor): the stellar population parameters. 
-                Basically, we only need the shapes and (mean, std) of `batch_theta`. 
-            batch_X (torch.Tensor): the observed SEDs, to compare with the predicted SEDs. 
+            batch_theta (torch.Tensor): the stellar population parameters.
+                Basically, we only need the shapes and (mean, std) of `batch_theta`.
+            batch_X (torch.Tensor): the observed SEDs, to compare with the predicted SEDs.
             optimizer (float): the optimizer to use for training, default is Adam.
             lr (float): learning rate for the optimizer.
-        
+
         """
         super().build(batch_theta, optimizer, lr, **kwargs)
-        
+
         scaler = StandardScaler(device=self.device)
         scaler.fit(batch_X)
         self.scaler = scaler
-        self.X = scaler.transform(batch_X) # z-scored observed SEDs
+        self.X = scaler.transform(batch_X)  # z-scored observed SEDs
 
-    
-    def train(self, 
+    def _get_loss(self, X, speculator, n_samples,
+                  noise, SNR, noise_model_dir,
+                  loss_fn):
+        Y = self.scaler.transform(
+            speculator._predict_mag_with_mass_redshift(
+                self.sample(n_samples), noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+        )
+        Y = torch.nan_to_num(Y, 0.0)
+        loss = torch.log10(loss_fn(X, Y))
+
+        return loss
+
+    def load_validation_data(self, X_vali, Y_vali):
+        self.X_vali = self.scaler.transform(X_vali)
+
+    def train(self,
               n_epochs: int = 100, n_samples=5000, lr=1e-3,
-              speculator=None, noise=True, SNR=20,
-              sinkhorn_kwargs={'p': 2, 'blur': 0.01, 'scaling': 0.8}, 
-              suffix: str = "nde"):
+              speculator=None, noise='nsa', SNR=20, noise_model_dir=None,
+              sinkhorn_kwargs={'p': 2, 'blur': 0.01, 'scaling': 0.8}):
         """
         Train the neural density estimator using Wasserstein loss.
         """
         # Define a Sinkhorn (~Wasserstein) loss between sampled measures
         L = SamplesLoss(loss="sinkhorn", **sinkhorn_kwargs)
         # Change learning rate
-        self.optimizer.param_groups[0]['lr'] = lr
-        
-        t = trange(n_epochs, 
-                   desc='Training NDE_theta using Wasserstein loss', 
+        # self.optimizer.param_groups[0]['lr'] = lr
+
+        t = trange(n_epochs,
+                   desc='Training NDE_theta using Wasserstein loss',
                    unit='epochs')
-        
+
         for epoch in t:
             self.optimizer.zero_grad()
-            Y = self.scaler.transform(
-                speculator._predict_mag_with_mass_redshift(
-                self.sample(n_samples), noise=noise, SNR=SNR)
-                )
-            Y = torch.nan_to_num(Y, 0.0)
-            loss = torch.log10(L(self.X, Y))
+            loss = self._get_loss(self.X, speculator, n_samples,
+                                  noise, SNR, noise_model_dir, L)
+            # Y = self.scaler.transform(
+            #     speculator._predict_mag_with_mass_redshift(
+            #         self.sample(n_samples), noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+            # )
+            # Y = torch.nan_to_num(Y, 0.0)
+            # loss = torch.log10(L(self.X, Y))
             loss.backward()
             self.optimizer.step()
             self.train_loss_history.append(loss.item())
-            t.set_description(f'Loss = {loss.item():.3f}')
+
+            vali_loss = self._get_loss(self.X_vali, speculator, len(self.X_vali),
+                                       noise, SNR, noise_model_dir, L)
+            self.vali_loss_history.append(vali_loss.item())
+
+            t.set_description(
+                f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali)')
 
             # Save the model if the loss is the best so far
             if loss.item() < self.min_loss:
-                # epoch - self.best_loss_epoch > self.patience and 
+                # epoch - self.best_loss_epoch > self.patience and
                 self.min_loss = loss.item()
                 # Don't save model too frequently
                 self.best_loss_epoch = len(self.train_loss_history)
                 self.best_model = copy.deepcopy(self)
                 if self.output_dir is not None:
                     self.save_model(
-                        os.path.join(self.output_dir, 
-                                    f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
-                        )
+                        os.path.join(self.output_dir,
+                                     f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
+                    )
 
     def goodness_of_fit(self, Y_truth):
         samples = self.sample(len(Y_truth))
-        L = SamplesLoss(loss="sinkhorn", p=2, blur=0.001, scaling=0.95) # very close to Wasserstein loss
-        self._goodness_of_fit = np.log10(L(Y_truth, samples).item()) # The distance in theta space
+        # very close to Wasserstein loss
+        L = SamplesLoss(loss="sinkhorn", p=2, blur=0.001, scaling=0.95)
+        self._goodness_of_fit = np.log10(
+            L(Y_truth, samples).item())  # The distance in theta space
         print('Log10 Wasserstein distance in theta space: ', self._goodness_of_fit)
+
 
 def diff_KL_w2009_eq29(X, Y, silent=True, p=1):
     """
@@ -505,8 +535,9 @@ def diff_KL_w2009_eq29(X, Y, silent=True, p=1):
     dNN1_XX = torch.cdist(X, X, p=p).sort()
     dNN1_XY = torch.cdist(X, Y, p=p).sort()
 
-    eps = torch.amax(torch.cat((dNN1_XX.values[:, 1:2], dNN1_XY.values[:, 0:1]), dim=1), 1) * 1.000001
-    
+    eps = torch.amax(torch.cat(
+        (dNN1_XX.values[:, 1:2], dNN1_XY.values[:, 0:1]), dim=1), 1) * 1.000001
+
     if not silent:
         print('  epsilons ', eps)
 
@@ -515,20 +546,20 @@ def diff_KL_w2009_eq29(X, Y, silent=True, p=1):
     mask = F.threshold(-F.threshold(res, 0., 0.), -1e-9, 1)
     l_i = torch.sum(mask, dim=1) - 1
     rho_i = torch.amax(torch.mul(dNN1_XX.values, mask), dim=1)
-    
+
     res = eps[:, None] - dNN1_XY.values
     mask = F.threshold(-F.threshold(res, 0., 0.), -1e-9, 1)
     k_i = torch.sum(mask, dim=1)
     nu_i = torch.amax(torch.mul(dNN1_XY.values, mask), dim=1)
-    
+
     if not silent:
         print('  l_i ', l_i)
         print('  k_i ', k_i)
 
     assert rho_i.min() >= 0., 'duplicate elements in your chain'
 
-    #mask = ~torch.isinf(torch.log(rho_i / nu_i))
-    d_corr = -d / n * torch.nansum(torch.log(rho_i / nu_i)) # 
+    # mask = ~torch.isinf(torch.log(rho_i / nu_i))
+    d_corr = -d / n * torch.nansum(torch.log(rho_i / nu_i))
 
     if not silent:
         print('  first term = %f' % d_corr)

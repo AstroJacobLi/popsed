@@ -21,6 +21,40 @@ from scipy.interpolate import interp1d
 from sedpy import observate
 # from sklearn.preprocessing import StandardScaler
 
+def flux2mag(flux): 
+    ''' convert flux in nanomaggies to magnitudes
+    From https://github.com/changhoonhahn/SEDflow/blob/main/src/sedflow/train.py
+    '''
+    if torch.is_tensor(flux):
+        return 22.5 - 2.5 * torch.log10(flux)
+    else:
+        return 22.5 - 2.5 * np.log10(flux)
+
+
+def mag2flux(mag): 
+    ''' convert magnitudes to flux in nanomaggies
+    '''
+    return 10**(0.4 * (22.5 - mag)) 
+
+
+def sigma_flux2mag(sigma_flux, flux): 
+    ''' convert sigma_flux to sigma_mag
+    '''
+    if torch.is_tensor(flux):
+        return torch.abs(-2.5 * (sigma_flux) / flux / 2.302585092994046)
+    else:
+        return np.abs(-2.5 * (sigma_flux) / flux / np.log(10))
+
+
+def sigma_mag2flux(sigma_mag, mag): 
+    ''' convert sigma_mag to sigma_flux
+    '''
+    flux = mag2flux(mag)
+    if torch.is_tensor(mag):
+        return torch.abs(flux) * torch.abs(-0.4 * 2.302585092994046 * sigma_mag)
+    else:
+        return np.abs(flux) * np.abs(-0.4 * np.log(10) * sigma_mag)
+
 
 class StandardScaler:
     def __init__(self, mean=None, std=None, epsilon=1e-7, device='cpu'):
@@ -294,10 +328,27 @@ class Speculator():
         Here the cosmology is WMAP9, consistent with `prospector`.
         """
         from prospect.sources.constants import cosmo #WMAP9
-        z_grid = torch.Tensor(np.arange(0, 5, 0.005))
+        z_grid = torch.arange(0, 5, 0.005)
         dist_grid = torch.Tensor(cosmo.luminosity_distance(z_grid).value) # Mpc
         self.z_grid = z_grid.to(self.device)
         self.dist_grid = dist_grid.to(self.device)
+        
+    def _parse_nsa_noise_model(self, noise_model_dir):
+        """
+        Here we replace the scipy interpolation function with torch Interp1d.
+        """
+        meds_sigs, stds_sigs = np.load(noise_model_dir, allow_pickle=True)
+        # meds_sigs is the median of noise, stds_sigs is the std of noise. All in magnitude.
+        
+        n_filters = len(meds_sigs)
+        mag_grid = torch.arange(10, 30, 1)
+        med_sig_grid = torch.vstack([Tensor(meds_sigs[i](mag_grid)) for i in range(n_filters)])
+        std_sig_grid = torch.vstack([Tensor(stds_sigs[i](mag_grid)) for i in range(n_filters)])
+        
+        self.mag_grid = mag_grid.to(self.device)
+        self.med_sig_grid = med_sig_grid.T.to(self.device)
+        self.std_sig_grid = std_sig_grid.T.to(self.device)
+        
 
     def load_data(self, pca_coeff, params, val_frac=0.2, batch_size=32,
                   wave_rest=torch.arange(3000, 11000, 2), wave_obs=torch.arange(3000, 11000, 2)):
@@ -599,7 +650,7 @@ class Speculator():
 
     def predict_mag(self, params, log_stellar_mass=None, redshift=None,
                     filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
-                    noise=False, SNR=10,):
+                    noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10,):
         '''
         Predict magnitudes for a given set of filters, based on the predicted spectrum. SLOW!
         See https://github.com/bd-j/prospector/blob/dda730feef5b8e679864521d0ac1c5f5f3db989c/prospect/models/sedmodel.py#L591
@@ -610,8 +661,13 @@ class Speculator():
             log_stellar_mass (torch.Tensor, or numpy array): log10 stellar mass of each spectrum, shape = (n_samples).
             redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
             filterset (list): list of filters to predict, default = ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
-            nosie (bool): whether to add noise to the predicted photometry.
-            SNR (float): signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry)
+            nosie (str): whether to add noise to the predicted photometry. 
+                If `noise=None`, no noise is added.
+                If `noise='nsa'`, we add noise based on NSA catalog. 
+                If `noise='snr'`, we add noise with constant SNR. Therefore, SNR must be provided.
+            noise_model_dir (str): directory of the noise model. Only works if `noise='nsa'`.
+            SNR (float): signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry).
+                Only works if `noise='snr'`.
             
         Returns:
             mags (torch.Tensor): predicted magnitudes, shape = (n_samples, n_filters).
@@ -639,7 +695,25 @@ class Speculator():
 
         maggies = torch.trapezoid(
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
-        if noise is True:
+        
+        
+        if noise == 'nsa':
+            ### Add noise based on NSA noise model. 
+            self._parse_nsa_noise_model(noise_model_dir)
+            mags = -2.5 * torch.log10(maggies) # noise-free magnitude
+            
+            _sigs_mags = torch.zeros_like(mags)
+            _sig_flux = torch.zeros_like(mags)
+            for i in range(maggies.shape[1]):
+                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[0]
+                _sigs_mags[:, i] += Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+                _sig_flux[:, i] = sigma_mag2flux(_sigs_mags[:, i], mags[:, i]) # in nanomaggies
+            _noise_flux = _sig_flux * torch.randn_like(mags) * 1e-9 # in maggies
+            _noise_flux[(_noise_flux + maggies) < 0] = 0.0
+            maggies += _noise_flux
+        
+        elif noise == 'snr':
+            ### Add noise with constant SNR.
             _noise = torch.randn_like(maggies) * maggies / SNR
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
@@ -690,7 +764,7 @@ class Speculator():
 
     def _predict_mag_with_mass_redshift(self, params, 
                                         filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
-                                        noise=True, SNR=10):
+                                        noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10):
         """
         Predict corresponding photometry (in magnitude), given physical parameters, stellar mass, and redshift.
 
@@ -701,8 +775,13 @@ class Speculator():
                 params[:, -1:] is the redshift.
 
             filterset (list): list of filters to predict, default = ['sdss_{0}0'.format(b) for b in 'ugriz'].
-            nosie (bool): whether to add noise to the predicted photometry.
-            SNR (float): signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry)
+            nosie (str): whether to add noise to the predicted photometry. 
+                If `noise=None`, no noise is added.
+                If `noise='nsa'`, we add noise based on NSA catalog. 
+                If `noise='snr'`, we add noise with constant SNR. Therefore, SNR must be provided.
+            noise_model_dir (str): directory of the noise model. Only works if `noise='nsa'`.
+            SNR (float): signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry).
+                Only works if `noise='snr'`.
 
         Returns:
             mags (torch.Tensor): predicted photometry, shape = (n_bands, n_samples).
@@ -727,11 +806,26 @@ class Speculator():
 
         maggies = torch.trapezoid(
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
-        if noise is True:
+        
+        if noise == 'nsa':
+            ### Add noise based on NSA noise model. 
+            self._parse_nsa_noise_model(noise_model_dir)
+            mags = -2.5 * torch.log10(maggies) # noise-free magnitude
+            _sigs_mags = torch.zeros_like(mags)
+            _sig_flux = torch.zeros_like(mags)
+            for i in range(maggies.shape[1]):
+                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+                _sig_flux[:, i] = sigma_mag2flux(_sigs_mags[:, i], mags[:, i]) # in nanomaggies
+            _noise = _sig_flux * torch.randn_like(mags) * 1e-9 # in maggies
+            _noise[(maggies + _noise) < 0] = 0.0
+            return -2.5 * torch.log10(maggies + _noise)
+            
+        elif noise == 'snr':
+            ### Add noise with constant SNR.
             _noise = torch.randn_like(maggies) * maggies / SNR
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
-                
+        
         mags = -2.5 * torch.log10(maggies)
 
         return mags
@@ -739,6 +833,9 @@ class Speculator():
     def save_model(self, filename):
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
+
+
+
 
 
 class Photulator():

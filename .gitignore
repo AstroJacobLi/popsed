@@ -1,3 +1,4 @@
+*.out
 sbi-logs/
 *.vscode
 .vscode
