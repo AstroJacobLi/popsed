@@ -34,6 +34,7 @@ def build_maf(
     num_transforms: int = 5,
     embedding_net: nn.Module = nn.Identity(),
     device: str = 'cuda',
+    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2], 'std': [1, 1, 1, 0.05]},
     **kwargs,
 ) -> nn.Module:
     """Builds MAF to describe p(x).
@@ -76,9 +77,14 @@ def build_maf(
         ]
     )
 
-    if z_score_x:  # normalize the input data
+    if z_score_x:
         transform_zx = standardizing_transform(batch_x)
         transform = transforms.CompositeTransform([transform_zx, transform])
+
+    if initial_pos is not None:
+        transform_init = transforms.AffineTransform(shift=-torch.Tensor(initial_pos['mean']) / torch.Tensor(initial_pos['std']), 
+            scale=1.0 / torch.Tensor(initial_pos['std']))
+        transform = transforms.CompositeTransform([transform_init, transform])
 
     distribution = distributions_.StandardNormal((x_numel,))
     neural_net = flows.Flow(transform, distribution, embedding_net).to(device)
@@ -94,6 +100,7 @@ def build_nsf(
     num_bins: int = 10,
     embedding_net: nn.Module = nn.Identity(),
     device: str = 'cuda',
+    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2], 'std': [1, 1, 1, 0.05]},
     **kwargs,
 ) -> nn.Module:
     """Builds NSF to describe p(x).
@@ -104,6 +111,7 @@ def build_nsf(
         num_transforms: Number of transforms.
         num_bins: Number of bins used for the splines.
         embedding_net: Optional embedding network for y.
+        initial_pos: only works when z_score_x is True.
         kwargs: Additional arguments that are passed by the build function but are not
             relevant for maf and are therefore ignored.
     Returns:
@@ -221,6 +229,11 @@ def build_nsf(
         transform_zx = standardizing_transform(batch_x)
         transform = transforms.CompositeTransform([transform_zx, transform])
 
+    if initial_pos is not None:
+        transform_init = transforms.AffineTransform(shift=-torch.Tensor(initial_pos['mean']) / torch.Tensor(initial_pos['std']), 
+            scale=1.0 / torch.Tensor(initial_pos['std']))
+        transform = transforms.CompositeTransform([transform_init, transform])
+
     distribution = distributions_.StandardNormal((x_numel,))
     neural_net = flows.Flow(transform, distribution, embedding_net).to(device)
 
@@ -235,6 +248,7 @@ class NeuralDensityEstimator(object):
     def __init__(
             self,
             normalize: bool = True,
+            initial_pos: dict = None,
             method: str = "nsf",
             hidden_features: int = 50,
             num_transforms: int = 5,
@@ -260,6 +274,7 @@ class NeuralDensityEstimator(object):
         self.num_transforms = num_transforms
         self.num_bins = num_bins  # only works for NSF
         self.normalize = normalize
+        self.initial_pos = initial_pos
         self.embedding_net = embedding_net
         self.train_loss_history = []
         self.vali_loss_history = []
@@ -283,6 +298,7 @@ class NeuralDensityEstimator(object):
             self.net = build_maf(
                 batch_x=batch_theta,
                 z_score_x=self.normalize,
+                initial_pos=self.initial_pos,
                 hidden_features=self.hidden_features,
                 num_transforms=self.num_transforms,
                 embedding_net=self.embedding_net,
@@ -293,6 +309,7 @@ class NeuralDensityEstimator(object):
             self.net = build_nsf(
                 batch_x=batch_theta,
                 z_score_x=self.normalize,
+                initial_pos=self.initial_pos,
                 hidden_features=self.hidden_features,
                 num_transforms=self.num_transforms,
                 num_bins=self.num_bins,
@@ -372,6 +389,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
     def __init__(
             self,
             normalize: bool = True,
+            initial_pos: dict = None,
             method: str = "nsf",
             hidden_features: int = 50,
             num_transforms: int = 5,
@@ -383,6 +401,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         Initialize Wasserstein Neural Density Estimator.
         Args:
             normalize: Whether to z-score the data.
+            initial_pos (dict): intial position of the Gaussian distribution. E.g., 
+                {'mean': [5, 1, 10.5, 0.2], 'std': [1, 1, 1, 0.05]}.
             method: Method to use for density estimation, either 'nsf' or 'maf'.
             hidden_features: Number of hidden features.
             num_transforms: Number of transforms.
@@ -394,6 +414,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         """
         super(WassersteinNeuralDensityEstimator, self).__init__(
             normalize=normalize,
+            initial_pos=initial_pos,
             method=method,
             hidden_features=hidden_features,
             num_transforms=num_transforms,
@@ -450,7 +471,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
     def train(self,
               n_epochs: int = 100, n_samples=5000, lr=1e-3,
               speculator=None, noise='nsa', SNR=20, noise_model_dir=None,
-              sinkhorn_kwargs={'p': 2, 'blur': 0.01, 'scaling': 0.8}):
+              sinkhorn_kwargs={'p': 1, 'blur': 0.01, 'scaling': 0.8}):
         """
         Train the neural density estimator using Wasserstein loss.
         """
