@@ -570,6 +570,8 @@ class Speculator():
         if redshift is not None:
             spec = self.transform(spec, redshift)
 
+        spec[(redshift <= 0.0).squeeze(1)] *= 0
+
         return spec
 
     def _predict_spec_with_mass(self, params):
