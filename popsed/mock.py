@@ -59,7 +59,9 @@ def build_model(uniform_priors=False, add_neb=False, add_duste=False, add_dustab
         model_params["dust_type"]["init"] = 2
         model_params["dust2"]["init"] = 0.0
         model_params["dust2"]["prior"] = priors.TopHat(mini=-1, maxi=0.4)
-        
+    else:
+        model_params["dust_type"]["init"] = 2
+        model_params["dust2"]["init"] = 0.0
         # # --- Complexify dust attenuation ---
         # # Switch to Kriek and Conroy 2013
         # model_params["dust_type"]["init"] = 4

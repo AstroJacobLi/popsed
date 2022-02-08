@@ -1,0 +1,11 @@
+start time ... 19:10:50
+Initialize SPS
+Total number of samples in parameter space:
+10000
+
+--- batch 4 ---
+  saving thetas to /scratch/gpfs/jiaxuanl/Data/popsed/train_sed/fsps.TZD.v0.1.theta.seed4.npy
+  saving log10(spectra) to /scratch/gpfs/jiaxuanl/Data/popsed/train_sed/fsps.TZD.v0.1.log10spectrum.seed4.npy
+
+Elapsed time =  2213.8445994853973
+end time ... 19:47:58
