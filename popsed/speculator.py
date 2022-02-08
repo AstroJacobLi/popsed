@@ -2,8 +2,10 @@
 Modified Speculator, based on https://github.com/justinalsing/speculator/blob/master/speculator/speculator.py
 '''
 
+from unittest.mock import NonCallableMagicMock
 import numpy as np
 import pickle
+# from pyrsistent import T
 from sklearn.decomposition import IncrementalPCA
 
 import torch
@@ -19,9 +21,12 @@ from torchinterp1d import Interp1d
 from scipy.interpolate import interp1d
 
 from sedpy import observate
+
+from tqdm import trange
 # from sklearn.preprocessing import StandardScaler
 
-def flux2mag(flux): 
+
+def flux2mag(flux):
     ''' convert flux in nanomaggies to magnitudes
     From https://github.com/changhoonhahn/SEDflow/blob/main/src/sedflow/train.py
     '''
@@ -31,13 +36,13 @@ def flux2mag(flux):
         return 22.5 - 2.5 * np.log10(flux)
 
 
-def mag2flux(mag): 
+def mag2flux(mag):
     ''' convert magnitudes to flux in nanomaggies
     '''
-    return 10**(0.4 * (22.5 - mag)) 
+    return 10**(0.4 * (22.5 - mag))
 
 
-def sigma_flux2mag(sigma_flux, flux): 
+def sigma_flux2mag(sigma_flux, flux):
     ''' convert sigma_flux to sigma_mag
     '''
     if torch.is_tensor(flux):
@@ -46,7 +51,7 @@ def sigma_flux2mag(sigma_flux, flux):
         return np.abs(-2.5 * (sigma_flux) / flux / np.log(10))
 
 
-def sigma_mag2flux(sigma_mag, mag): 
+def sigma_mag2flux(sigma_mag, mag):
     ''' convert sigma_mag to sigma_flux
     '''
     flux = mag2flux(mag)
@@ -77,12 +82,14 @@ class StandardScaler:
         self.is_tensor = torch.is_tensor(values)
         if self.is_tensor:
             dims = list(range(values.dim() - 1))
-            self.mean = torch.mean(values, dim=dims).to(self.device)
-            self.std = torch.std(values, dim=dims).to(self.device)
+            goodflag = ~(torch.isnan(values).any(dim=-1) |
+                         torch.isinf(values).any(dim=-1))
+            self.mean = torch.mean(values[goodflag], dim=dims).to(self.device)
+            self.std = torch.std(values[goodflag], dim=dims).to(self.device)
         else:  # numpy array
             dims = list(range(values.ndim - 1))
-            self.mean = np.mean(values, axis=tuple(dims))
-            self.std = np.std(values, axis=tuple(dims))
+            self.mean = np.nanmean(values, axis=tuple(dims))
+            self.std = np.nanstd(values, axis=tuple(dims))
 
     def transform(self, values, device=None):
         if device is None:
@@ -130,17 +137,21 @@ class SpectrumPCA():
         self.PCA = IncrementalPCA(n_components=self.n_pcas)
         # parameter selection (implementing any cuts on strange parts of parameter space)
         self.parameter_selection = parameter_selection
-
+    
     def scale_spectra(self):
         # scale spectra
         log_spec = np.concatenate([np.load(self.log_spectrum_filenames[i])
-                                  for i in range(len(self.log_spectrum_filenames))])
+                                  for i in range(len(self.log_spectrum_filenames))])[:, 500:]
+        log_spec = interp_nan(log_spec)
+
         self.logspec_scaler.fit(log_spec)
         self.normalized_logspec = self.logspec_scaler.transform(log_spec)
 
     # train PCA incrementally
-    def train_pca(self):
-        self.PCA.partial_fit(self.normalized_logspec)
+    def train_pca(self, chunk_size=1000):
+        _chunks = list(split_chunks(self.normalized_logspec, chunk_size))
+        for chunk in _chunks:
+            self.PCA.partial_fit(chunk)
         # set the PCA transform matrix
         self.pca_transform_matrix = self.PCA.components_
 
@@ -173,14 +184,16 @@ class SpectrumPCA():
         # load in the data (and select based on parameter selection if neccessary)
         if self.parameter_selection is None:
             # load spectra and shift+scale
-            log_spectra = np.load(log_spectrum_filename)
+            log_spectra = np.load(log_spectrum_filename)[:, 500:]
+            log_spectra = interp_nan(log_spectra)
             normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
         else:
             selection = self.parameter_selection(
                 np.load(self.parameter_filename))
 
             # load spectra and shift+scale
-            log_spectra = np.load(log_spectrum_filename)[selection, :]
+            log_spectra = np.load(log_spectrum_filename)[selection, :][:, 500:]
+            log_spectra = interp_nan(log_spectra)
             normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
 
         # transform to PCA basis and back
@@ -196,6 +209,19 @@ class SpectrumPCA():
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
 
+
+def split_chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+def interp_nan(log_spec):
+    def nan_helper(y):
+            return np.isnan(y), lambda z: z.nonzero()[0]
+    for _spec in log_spec:
+        nans, x = nan_helper(_spec)
+        _spec[nans] = np.interp(x(nans), x(~nans), _spec[~nans])
+    return log_spec
 
 class CustomActivation(nn.Module):
     '''
@@ -286,24 +312,24 @@ class Speculator():
     Emulator for spectrum data. Training is done in restframe.
     """
 
-    def __init__(self, n_parameters: int = None,
-                 wavelengths=None,
+    def __init__(self, name='TZD',
+                 n_parameters: int = None,
                  pca_filename: str = None,
                  hidden_size: list = None):
         """
         Initialize the emulator.
 
         Parameters:
+            name (str): name of the emulator
             n_parameters: number of parameters to be used in the emulator.
             pca_filename: filename of the PCA object to be used.
             hidden_size: list of hidden layer sizes, e.g., [100, 100, 100].
         """
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu')
+        self.name = name
         self.n_parameters = n_parameters  # e.g., n_parameters = 9
         self.hidden_size = hidden_size  # e.g., [100, 100, 100]
-        # e.g., wavelengths = np.arange(3800, 7000, 2)
-        self.wavelengths = wavelengths
         self.pca_filename = pca_filename
         with open(self.pca_filename, 'rb') as f:
             self.pca = pickle.load(f)
@@ -316,42 +342,57 @@ class Speculator():
 
         self.train_loss_history = []
         self.val_loss_history = []
-        
+
         self._build_distance_interpolator()
-        
+        self._build_params_prior()
+
+    def _build_params_prior(self):
+        """
+        Hard bound prior for the input physical parameters. Such as tage cannot be negative.
+        """
+        self.prior = {'tage': [0, 14],
+                      'logtau': [-3, 3],
+                      'logzsol': [-3, 2],
+                      'dust2': [0, 4],}
+
     def _build_distance_interpolator(self):
         """
         Since the `astropy.cosmology` is not differentiable, we build a distance 
         interpolator which allows us to calculate the luminosity distance at 
         any given redshift in a differentiable way.
-        
+
         Here the cosmology is WMAP9, consistent with `prospector`.
         """
-        from prospect.sources.constants import cosmo #WMAP9
+        from prospect.sources.constants import cosmo  # WMAP9
         z_grid = torch.arange(0, 5, 0.005)
-        dist_grid = torch.Tensor(cosmo.luminosity_distance(z_grid).value) # Mpc
+        dist_grid = torch.Tensor(
+            cosmo.luminosity_distance(z_grid).value)  # Mpc
         self.z_grid = z_grid.to(self.device)
         self.dist_grid = dist_grid.to(self.device)
-        
+
     def _parse_nsa_noise_model(self, noise_model_dir):
         """
         Here we replace the scipy interpolation function with torch Interp1d.
         """
         meds_sigs, stds_sigs = np.load(noise_model_dir, allow_pickle=True)
         # meds_sigs is the median of noise, stds_sigs is the std of noise. All in magnitude.
-        
+
         n_filters = len(meds_sigs)
         mag_grid = torch.arange(10, 30, 1)
-        med_sig_grid = torch.vstack([Tensor(meds_sigs[i](mag_grid)) for i in range(n_filters)])
-        std_sig_grid = torch.vstack([Tensor(stds_sigs[i](mag_grid)) for i in range(n_filters)])
-        
+        med_sig_grid = torch.vstack(
+            [Tensor(meds_sigs[i](mag_grid)) for i in range(n_filters)])
+        std_sig_grid = torch.vstack(
+            [Tensor(stds_sigs[i](mag_grid)) for i in range(n_filters)])
+
         self.mag_grid = mag_grid.to(self.device)
         self.med_sig_grid = med_sig_grid.T.to(self.device)
         self.std_sig_grid = std_sig_grid.T.to(self.device)
-        
 
-    def load_data(self, pca_coeff, params, val_frac=0.2, batch_size=32,
-                  wave_rest=torch.arange(3000, 11000, 2), wave_obs=torch.arange(3000, 11000, 2)):
+    def load_data(self, pca_coeff, params,
+                  params_name=['tage', 'logtau'],
+                  val_frac=0.2, batch_size=32,
+                  wave_rest=torch.arange(3000, 11000, 2),
+                  wave_obs=torch.arange(3000, 11000, 2)):
         """
         Load data into the emulator.
 
@@ -364,6 +405,8 @@ class Speculator():
             wave_rest: restframe wavelength of the spectrum data. Default is `torch.arange(3000, 11000, 2)`.
             wave_obs: observed wavelength of the spectrum data. Default is `torch.arange(3000, 11000, 2)`.
         """
+        self.params_name = params_name
+
         # Normalize PCA coefficients
         self.pca_scaler.fit(pca_coeff)  # scale PCA coefficients
         pca_coeff = self.pca_scaler.transform(pca_coeff)
@@ -395,7 +438,10 @@ class Speculator():
         self.wave_rest = wave_rest.to(self.device)
         self.wave_obs = wave_obs.to(self.device)
 
-    def train(self, learning_rate=0.002, n_epochs=50, display=False):
+        self.bounds = [self.prior[key] for key in self.params_name]
+
+    def train(self, learning_rate=0.002, n_epochs=50, display=False, 
+              scheduler=None, scheduler_args=None,):
         """
         Train the NN emulator.
 
@@ -403,19 +449,29 @@ class Speculator():
             learning_rate (float): learning rate for the optimizer, default = 0.002.
             n_epochs (int): number of epochs for training, default = 50.
             display (bool): whether to display training/validation loss, default = False.
+            scheduler (torch.optim.lr_scheduler): learning rate scheduler, default = None.
         """
         the_last_loss = 1e-3
         min_loss = 1e-2
-        min_recon_err = 1e-3
+        min_recon_err = 1e-2
         patience = 20
         trigger_times = 0
 
-        optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(self.network.parameters())
+        
+        if scheduler is not None and scheduler_args is not None:
+            scheduler = scheduler(self.optimizer, **scheduler_args)
+        else:
+            self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
+        
         loss_fn = nn.MSELoss()
 
-        for epoch in range(n_epochs):
-            running_loss = 0.0
+        t = trange(n_epochs,
+                   desc='Training Speculator',
+                   unit='epochs')
 
+        for epoch in t:
+            running_loss = 0.0
             for phase in ['train', 'val']:
                 if phase == 'train':
                     self.network.train()  # Set model to training mode
@@ -427,7 +483,7 @@ class Speculator():
                     inputs = Variable(inputs).to(self.device)
                     labels = Variable(labels).to(self.device)  # .double()
 
-                    optimizer.zero_grad()
+                    self.optimizer.zero_grad()
 
                     with torch.set_grad_enabled(phase == 'train'):
                         outputs = self.network(inputs)
@@ -440,9 +496,12 @@ class Speculator():
                         # backward + optimize only if in training phase
                         if phase == 'train':
                             loss.backward()
-                            optimizer.step()
+                            self.optimizer.step()
+                            if scheduler is not None:
+                                scheduler.step()
 
                     running_loss += loss.item()
+                    
 
                 epoch_loss = running_loss / \
                     len(self.dataloaders[phase].dataset)
@@ -451,11 +510,8 @@ class Speculator():
                 if phase == 'val':
                     self.val_loss_history.append(epoch_loss)
 
-                if epoch % 100 == 0:
-                    print(
-                        'Epoch: {} - {} Loss: {:.4f}'.format(epoch, phase, epoch_loss))
 
-            if epoch_loss > the_last_loss:
+            if self.train_loss_history[-1] > the_last_loss:
                 trigger_times += 1
                 #print('trigger times:', trigger_times)
                 if trigger_times >= patience:
@@ -466,10 +522,10 @@ class Speculator():
 
             the_last_loss = epoch_loss
 
-            if epoch_loss < min_loss:
-                min_loss = epoch_loss
+            if self.train_loss_history[-1] < min_loss:
+                min_loss = self.train_loss_history[-1]
                 self.save_model('speculator_best_loss_model.pkl')
-                self.best_loss_epoch = epoch
+                self.best_loss_epoch = len(self.train_loss_history) - 1
 
             for x, y in self.dataloaders['val']:
                 spec = torch.log10(self.predict_spec(x))
@@ -480,10 +536,21 @@ class Speculator():
             if recon_err < min_recon_err:
                 min_recon_err = recon_err
                 self.save_model('speculator_best_recon_model.pkl')
-                self.best_recon_err_epoch = epoch
+                self.best_recon_err_epoch = len(self.train_loss_history) - 1
+
+            t.set_description(
+                f'Loss = {self.train_loss_history[-1]:.5f} (train)')
 
         if display:
             self.plot_loss()
+
+        print(
+            'Epoch: {} - {} Train Loss: {:.4f}'.format(len(self.train_loss_history), phase, self.train_loss_history[-1]))
+        print(
+            'Epoch: {} - {} Vali Loss: {:.4f}'.format(len(self.val_loss_history), phase, self.val_loss_history[-1]))
+        print('Recon error:', recon_err)
+        if scheduler is not None:
+            print('lr:', scheduler.get_lr())
 
     def plot_loss(self):
         """
@@ -513,15 +580,18 @@ class Speculator():
             z = torch.tensor(z, dtype=torch.float).to(self.device)
         z = z.squeeze()
 
-        wave_redshifted = (self.wave_rest.unsqueeze(1) * (1 + z)).T
-        
-        distances = Interp1d()(self.z_grid, self.dist_grid, z)
-        dfactor = ((distances * 1e5)**2 / (1 + z))
-        
-        # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value 
-        # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
-        spec = Interp1d()(wave_redshifted, spectrum_restframe, self.wave_obs) / dfactor.T
-        return spec
+        if torch.any(z > 0):
+            wave_redshifted = (self.wave_rest.unsqueeze(1) * (1 + z)).T
+
+            distances = Interp1d()(self.z_grid, self.dist_grid, z)
+            dfactor = ((distances * 1e5)**2 / (1 + z))
+
+            # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
+            # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
+            spec = Interp1d()(wave_redshifted, spectrum_restframe, self.wave_obs) / dfactor.T
+            return spec
+        else:
+            return spectrum_restframe
 
     def predict(self, params):
         """
@@ -554,45 +624,11 @@ class Speculator():
         Returns:
             spec (torch.Tensor): predicted spectrum, shape = (n_wavelength, n_samples).
         """
-        pca_coeff = self.predict(params)  # Assuming 1 M_sun.
-        log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
-            pca_coeff, device=self.device), device=self.device)  # log_spectrum
-
-        if log_stellar_mass is not None:
-            if not torch.is_tensor(log_stellar_mass):
-                log_stellar_mass = torch.Tensor(
-                    log_stellar_mass.reshape(-1, 1)).to(self.device)
-            log_spec += log_stellar_mass
-
-        spec = 10**log_spec
-        # such that interpolation will not do linear extrapolation.
-        spec[:, 0] = torch.nan
-        if redshift is not None:
-            spec = self.transform(spec, redshift)
-
-        spec[(redshift <= 0.0).squeeze(1)] *= 0
-
-        return spec
-
-    def _predict_spec_with_mass(self, params):
-        """
-        Predict corresponding spectrum (in linear scale), given physical parameters.
-
-        Args:
-            params (torch.Tensor): physical parameters, including mass. shape = (n_samples, n_params).
-                params[:, :-1] are the physical parameters.
-                params[:, -1:] is the log10 stellar mass.
-
-        Returns:
-            spec (torch.Tensor): predicted spectrum, shape = (n_wavelength, n_samples).
-        """
-        pca_coeff = self.predict(params[:, :-1])  # Assuming 1 M_sun and z=0.0.
-        log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
-            pca_coeff, device=self.device), device=self.device) + params[:, -1:]  # log_spectrum
-
-        spec = 10 ** log_spec
-
-        return spec
+        if log_stellar_mass is None:
+            log_stellar_mass = torch.zeros_like(params[:, 0:1])
+        if redshift is None:
+            redshift = torch.zeros_like(params[:, 0:1])
+        return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device))
 
     def _predict_spec_with_mass_redshift(self, params):
         """
@@ -615,6 +651,14 @@ class Speculator():
         # such that interpolation will not do linear extrapolation.
         # spec[:, 0] = 0.0  # torch.nan
         spec = self.transform(spec, params[:, -1])
+
+        bad_mask = torch.stack([((params[:, :-2] < self.bounds[i][0]) | (params[:, :-2] > self.bounds[i][1]))[
+            :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
+
+        bad_val = -torch.inf  # 1e-24
+        spec[bad_mask] = bad_val
+        spec[(params[:, -1:] < 0.0).squeeze(1)] = bad_val
+        spec[(params[:, -2:-1] < 0.0).squeeze(1)] = bad_val
 
         return spec
 
@@ -650,121 +694,26 @@ class Speculator():
         self.transmission_effiency = Tensor(_epsilon).to(self.device)
         self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 
-    def predict_mag(self, params, log_stellar_mass=None, redshift=None,
-                    filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
-                    noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10,):
-        '''
-        Predict magnitudes for a given set of filters, based on the predicted spectrum. SLOW!
-        See https://github.com/bd-j/prospector/blob/dda730feef5b8e679864521d0ac1c5f5f3db989c/prospect/models/sedmodel.py#L591
-        and also https://github.com/pmelchior/spectrum-encoder/blob/e817fbd3bef2a3a829ea289d4b6bef41265ad60d/model.py#L255-L257.
-
-        Parameters:
-            params (torch.Tensor): physical parameters, shape = (n_samples, n_params).
-            log_stellar_mass (torch.Tensor, or numpy array): log10 stellar mass of each spectrum, shape = (n_samples).
-            redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
-            filterset (list): list of filters to predict, default = ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
-            nosie (str): whether to add noise to the predicted photometry. 
-                If `noise=None`, no noise is added.
-                If `noise='nsa'`, we add noise based on NSA catalog. 
-                If `noise='snr'`, we add noise with constant SNR. Therefore, SNR must be provided.
-            noise_model_dir (str): directory of the noise model. Only works if `noise='nsa'`.
-            SNR (float): signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry).
-                Only works if `noise='snr'`.
-            
-        Returns:
-            mags (torch.Tensor): predicted magnitudes, shape = (n_samples, n_filters).
-        '''
-        if hasattr(self, 'filterset') and self.filterset != filterset:
-            self.filterset = filterset
-            self._calc_transmission(filterset)
-        elif hasattr(self, 'filterset') and self.filterset == filterset:
-            # Don't interpolate transmission efficiency again.
-            pass
-        elif hasattr(self, 'filterset') is False:
-            self._calc_transmission(filterset)
-
-        # get magnitude from a spectrum
-        lightspeed = 2.998e18  # AA/s
-        jansky_cgs = 1e-23
-
-        _spec = self.predict_spec(params,
-                                  log_stellar_mass=log_stellar_mass,
-                                  redshift=redshift)
-
-        _spec *= lightspeed / self.wave_obs**2 * \
-            (3631 * jansky_cgs)  # in cgs/AA units
-        _spec = torch.nan_to_num(_spec, 0.0)
-
-        maggies = torch.trapezoid(
-            ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
-        
-        
-        if noise == 'nsa':
-            ### Add noise based on NSA noise model. 
-            self._parse_nsa_noise_model(noise_model_dir)
-            mags = -2.5 * torch.log10(maggies) # noise-free magnitude
-            
-            _sigs_mags = torch.zeros_like(mags)
-            _sig_flux = torch.zeros_like(mags)
-            for i in range(maggies.shape[1]):
-                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[0]
-                _sigs_mags[:, i] += Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
-                _sig_flux[:, i] = sigma_mag2flux(_sigs_mags[:, i], mags[:, i]) # in nanomaggies
-            _noise_flux = _sig_flux * torch.randn_like(mags) * 1e-9 # in maggies
-            _noise_flux[(_noise_flux + maggies) < 0] = 0.0
-            maggies += _noise_flux
-        
-        elif noise == 'snr':
-            ### Add noise with constant SNR.
-            _noise = torch.randn_like(maggies) * maggies / SNR
-            _noise[(maggies + _noise) < 0] = 0.0
-            maggies += _noise
-        
-        mags = -2.5 * torch.log10(maggies)
-        # if noise is True:
-        #     mags += torch.randn_like(mags) * 0.1
-        
-        return mags
-
-    def _predict_mag_with_mass(self, params, filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz']):
+    def predict_mag(self, params, log_stellar_mass=None, redshift=None, **kwargs):
         """
-        Predict corresponding photometry (in magnitude), given physical parameters, stellar mass.
-        Assuming redshift = 0.0.
+        Predict corresponding spectrum (in linear scale), given physical parameters.
 
         Args:
-            params (torch.Tensor): physical parameters, including mass. shape = (n_samples, n_params).
-                params[:, :-1] are the physical parameters (not including stellar mass).
-                params[:, -1:] is the log10 stellar mass.
-            filterset (list): list of filters to predict, default = ['sdss_{0}0'.format(b) for b in 'ugriz'].
+            params (torch.Tensor): physical parameters (not including stellar mass and redshift), 
+                shape = (n_samples, n_params).
+            log_stellar_mass (torch.Tensor, or numpy array): log10 stellar mass of each spectrum, shape = (n_samples).
+            redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
 
         Returns:
-            mags (torch.Tensor): predicted photometry, shape = (n_bands, n_samples).
+            spec (torch.Tensor): predicted spectrum, shape = (n_wavelength, n_samples).
         """
-        if hasattr(self, 'filterset') and self.filterset != filterset:
-            self.filterset = filterset
-            self._calc_transmission(filterset)
-        elif hasattr(self, 'filterset') and self.filterset == filterset:
-            # Don't interpolate transmission efficiency again.
-            pass
-        elif hasattr(self, 'filterset') is False:
-            self._calc_transmission(filterset)
+        if log_stellar_mass is None:
+            log_stellar_mass = torch.zeros_like(params[:, 0:1])
+        if redshift is None:
+            redshift = torch.zeros_like(params[:, 0:1])
+        return self._predict_mag_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device), **kwargs)
 
-        # get magnitude from a spectrum
-        lightspeed = 2.998e18  # AA/s
-        jansky_cgs = 1e-23
-
-        _spec = self._predict_spec_with_mass(
-            params) * lightspeed / self.wave_obs**2 * (3631 * jansky_cgs)  # in cgs/AA units
-
-        _spec = torch.nan_to_num(_spec, 0.0)
-
-        maggies = torch.trapezoid(
-            ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
-        mags = -2.5 * torch.log10(maggies)
-
-        return mags
-
-    def _predict_mag_with_mass_redshift(self, params, 
+    def _predict_mag_with_mass_redshift(self, params,
                                         filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
                                         noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10):
         """
@@ -803,227 +752,37 @@ class Speculator():
 
         _spec = self._predict_spec_with_mass_redshift(
             params) * lightspeed / self.wave_obs**2 * (3631 * jansky_cgs)  # in cgs/AA units
-
         _spec = torch.nan_to_num(_spec, 0.0)
 
         maggies = torch.trapezoid(
-            ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]), self.wave_obs) / self.ab_zero_counts
-        
+            ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
+            ), self.wave_obs) / self.ab_zero_counts
+
         if noise == 'nsa':
-            ### Add noise based on NSA noise model. 
+            # Add noise based on NSA noise model.
             self._parse_nsa_noise_model(noise_model_dir)
-            mags = -2.5 * torch.log10(maggies) # noise-free magnitude
+            mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
             _sigs_mags = torch.zeros_like(mags)
             _sig_flux = torch.zeros_like(mags)
             for i in range(maggies.shape[1]):
-                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
-                _sig_flux[:, i] = sigma_mag2flux(_sigs_mags[:, i], mags[:, i]) # in nanomaggies
-            _noise = _sig_flux * torch.randn_like(mags) * 1e-9 # in maggies
+                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
+                    0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+                _sig_flux[:, i] = sigma_mag2flux(
+                    _sigs_mags[:, i], mags[:, i])  # in nanomaggies
+            _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
             _noise[(maggies + _noise) < 0] = 0.0
             return -2.5 * torch.log10(maggies + _noise)
-            
+
         elif noise == 'snr':
-            ### Add noise with constant SNR.
+            # Add noise with constant SNR.
             _noise = torch.randn_like(maggies) * maggies / SNR
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
-        
+
         mags = -2.5 * torch.log10(maggies)
 
         return mags
 
     def save_model(self, filename):
-        with open(filename, 'wb') as f:
-            pickle.dump(self, f)
-
-
-
-
-
-class Photulator():
-    """
-    Emulator for photometry data. Directly predict magnitudes from physical parameters.
-    """
-
-    def __init__(self, n_parameters: int = None,
-                 filterset: list = None,
-                 hidden_size: list = None):
-        """
-        Initialize the emulator.
-
-        Parameters:
-            n_parameters: number of parameters to be used in the emulator.
-            hidden_size: list of hidden layer sizes, e.g., [100, 100, 100].
-        """
-        self.device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu')
-        self.n_parameters = n_parameters  # e.g., n_parameters = 9
-        self.hidden_size = hidden_size  # e.g., [100, 100, 100]
-        # e.g., wavelengths = np.arange(3800, 7000, 2)
-        self.filterset = filterset
-
-        self.n_phot = len(self.filterset)
-        self.phot_scaler = StandardScaler(device=self.device)
-
-        self.network = Network(
-            self.n_parameters, self.hidden_size, self.n_phot)
-        self.network.to(self.device)
-
-        self.train_loss_history = []
-        self.val_loss_history = []
-
-    def load_data(self, phot, params, val_frac=0.2, batch_size=32):
-        """
-        Load data into the emulator.
-
-        Parameters:
-            phot: magnitudes in each band, not normalized.
-            params: parameters of the spectrum data, such as tage and tau.
-            val_frac (float): fraction of the data to be used for validation.
-            batch_size (int): batch size for training.
-        """
-        # Normalize magnitudes
-        assert phot.shape[1] == self.n_phot, 'Number of bands mismatch.'
-
-        self.phot_scaler.fit(phot)
-        phot = self.phot_scaler.transform(phot)
-
-        assert len(phot) == len(
-            params), 'magnitudes and parameters must have the same length'
-
-        self.n_samples = len(phot)
-
-        # Translate data to tensor
-        x = torch.FloatTensor(params)  # physical parameters
-        y = torch.FloatTensor(phot)  # PCA coefficients
-        dataset = TensorDataset(x, y)
-
-        val_len = int(self.n_samples * val_frac)
-        train_len = self.n_samples - val_len
-
-        train_data, val_data = torch.utils.data.random_split(dataset,
-                                                             [train_len, val_len],
-                                                             generator=torch.Generator().manual_seed(24))
-
-        dataloaders = {}
-        dataloaders['train'] = DataLoader(
-            train_data, batch_size=batch_size, shuffle=True)
-        dataloaders['val'] = DataLoader(val_data, batch_size=val_len)
-
-        self.dataloaders = dataloaders
-
-    def train(self, learning_rate=0.002, n_epochs=50, display=False):
-        """
-        Train the NN emulator.
-
-        Parameters:
-            learning_rate (float): learning rate for the optimizer, default = 0.002.
-            n_epochs (int): number of epochs for training, default = 50.
-            display (bool): whether to display training/validation loss, default = False.
-        """
-        the_last_loss = 1e-3
-        min_loss = 1e-2
-        min_recon_err = 1e-3
-        patience = 20
-        trigger_times = 0
-
-        optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
-        loss_fn = nn.MSELoss()
-
-        for epoch in range(n_epochs):
-            running_loss = 0.0
-
-            for phase in ['train', 'val']:
-                if phase == 'train':
-                    self.network.train()  # Set model to training mode
-                else:
-                    self.network.eval()   # Set model to evaluate mode
-
-                # Iterate over data.
-                for inputs, labels in self.dataloaders[phase]:
-                    inputs = Variable(inputs).to(self.device)
-                    labels = Variable(labels).to(self.device)  # .double()
-
-                    optimizer.zero_grad()
-
-                    with torch.set_grad_enabled(phase == 'train'):
-                        outputs = self.network(inputs)
-                        loss = loss_fn(outputs, labels)
-                        # backward + optimize only if in training phase
-                        if phase == 'train':
-                            loss.backward()
-                            optimizer.step()
-
-                    running_loss += loss.item()
-
-                epoch_loss = running_loss / \
-                    len(self.dataloaders[phase].dataset)
-                if phase == 'train':
-                    self.train_loss_history.append(epoch_loss)
-                if phase == 'val':
-                    self.val_loss_history.append(epoch_loss)
-
-                if epoch % 100 == 0:
-                    print(
-                        'Epoch: {} - {} Loss: {:.4f}'.format(epoch, phase, epoch_loss))
-
-            if epoch_loss > the_last_loss:
-                trigger_times += 1
-                if trigger_times >= patience:
-                    print('Early stopping!\nStart to test process.')
-                    return
-            else:
-                trigger_times = 0
-
-            the_last_loss = epoch_loss
-
-            if epoch_loss < min_loss:
-                min_loss = epoch_loss
-                self.save_model('phot_best_loss_model.pkl')
-                self.best_loss_epoch = epoch
-
-            for x, y in self.dataloaders['val']:
-                phot_pre = self.predict_mag(x)  # x is params, y is magnitudes
-                phot_val = self.phot_scaler.inverse_transform(
-                    y.to(self.device))
-
-            recon_err = torch.median(
-                torch.abs((phot_pre - phot_val) / torch.abs(phot_val)))
-            if recon_err < min_recon_err:
-                min_recon_err = recon_err
-                self.save_model('phot_best_recon_err_model.pkl')
-                self.best_recon_err_epoch = epoch
-
-        if display:
-            self.plot_loss()
-
-    def plot_loss(self):
-        """
-        Plot loss curve.
-        """
-        import matplotlib.pyplot as plt
-        plt.plot(np.array(self.train_loss_history).flatten(), label='Train loss')
-        plt.plot(np.array(self.val_loss_history).flatten(), label='Val loss')
-        plt.legend()
-
-        plt.yscale('log')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-
-    def predict_mag(self, params):
-        """
-        Predict magnitudes, given physical parameters.
-        """
-        if not torch.is_tensor(params):
-            params = torch.Tensor(params).to(self.device)
-        params = params.to(self.device)
-        self.network.eval()
-        phot = self.network(params)
-        phot = self.phot_scaler.inverse_transform(
-            phot, device=self.device)
-
-        return phot
-
-    def save_model(self, filename):
-        with open(filename, 'wb') as f:
+        with open(filename.replace('.pkl', '') + '_' + self.name + '.pkl', 'wb') as f:
             pickle.dump(self, f)

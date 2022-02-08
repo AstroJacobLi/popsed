@@ -1,6 +1,5 @@
 '''
 Neural density estimators, build based on https://github.com/mackelab/sbi/blob/019fde2d61edbf8b4a02e034dc9c056b0d240a5c/sbi/neural_nets/flow.py#L77
-
 But here everything is not conditioned.
 '''
 import torch
@@ -34,7 +33,9 @@ def build_maf(
     num_transforms: int = 5,
     embedding_net: nn.Module = nn.Identity(),
     device: str = 'cuda',
-    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2], 'std': [1, 1, 1, 0.05]},
+    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2], 
+    'std': [1, 1, 1, 0.05], 
+    'perturb': [0.3, 0.3, 0.3, 0.05]},
     **kwargs,
 ) -> nn.Module:
     """Builds MAF to describe p(x).
@@ -82,10 +83,12 @@ def build_maf(
         transform = transforms.CompositeTransform([transform_zx, transform])
 
     if initial_pos is not None:
-        transform_init = transforms.AffineTransform(shift=-torch.Tensor(initial_pos['mean']) / torch.Tensor(initial_pos['std']), 
-            scale=1.0 / torch.Tensor(initial_pos['std']))
+        _mean = np.random.multivariate_normal(
+            initial_pos['mean'], np.diag(initial_pos['perturb']))
+        transform_init = transforms.AffineTransform(shift=torch.Tensor(-_mean) / torch.Tensor(initial_pos['std']),
+                                                    scale=1.0 / torch.Tensor(initial_pos['std']))
         transform = transforms.CompositeTransform([transform_init, transform])
-
+    
     distribution = distributions_.StandardNormal((x_numel,))
     neural_net = flows.Flow(transform, distribution, embedding_net).to(device)
 
@@ -100,7 +103,7 @@ def build_nsf(
     num_bins: int = 10,
     embedding_net: nn.Module = nn.Identity(),
     device: str = 'cuda',
-    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2], 'std': [1, 1, 1, 0.05]},
+    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2], 'std': [1, 1, 1, 0.05], 'perturb': [0.3, 0.3, 0.3, 0.05]},
     **kwargs,
 ) -> nn.Module:
     """Builds NSF to describe p(x).
@@ -230,8 +233,10 @@ def build_nsf(
         transform = transforms.CompositeTransform([transform_zx, transform])
 
     if initial_pos is not None:
-        transform_init = transforms.AffineTransform(shift=-torch.Tensor(initial_pos['mean']) / torch.Tensor(initial_pos['std']), 
-            scale=1.0 / torch.Tensor(initial_pos['std']))
+        _mean = np.random.multivariate_normal(
+            initial_pos['mean'], np.diag(initial_pos['perturb']))
+        transform_init = transforms.AffineTransform(shift=torch.Tensor(-_mean) / torch.Tensor(initial_pos['std']),
+                                                    scale=1.0 / torch.Tensor(initial_pos['std']))
         transform = transforms.CompositeTransform([transform_init, transform])
 
     distribution = distributions_.StandardNormal((x_numel,))
@@ -326,7 +331,7 @@ class NeuralDensityEstimator(object):
             raise ValueError(
                 f"Unknown optimizer {optimizer}, only support 'Adam' now.")
 
-    def train(self, n_epochs: int = 2000, display=False, suffix: str = "nde"):
+    def _train(self, n_epochs: int = 2000, display=False, suffix: str = "nde"):
         """
         Train the neural density estimator based on input data.
         """
@@ -423,7 +428,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             **kwargs
         )
         self.patience = 5
-        self.min_loss = -1
+        self.min_loss = 0.1
         self.best_loss_epoch = 0
         self.index = np.random.randint(0, 1000)
         # Used to identify the model
@@ -451,7 +456,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         scaler = StandardScaler(device=self.device)
         scaler.fit(batch_X)
         self.scaler = scaler
-        self.X = scaler.transform(batch_X)  # z-scored observed SEDs
+        self.X = scaler.transform(batch_X).detach()  # z-scored observed SEDs
 
     def _get_loss(self, X, speculator, n_samples,
                   noise, SNR, noise_model_dir,
@@ -460,10 +465,17 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             speculator._predict_mag_with_mass_redshift(
                 self.sample(n_samples), noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
         )
-        Y = torch.nan_to_num(Y, 0.0)
-        loss = torch.log10(loss_fn(X, Y))
+        bad_mask = (torch.isnan(Y).any(dim=1) | torch.isinf(Y).any(dim=1))
+        bad_ratio = bad_mask.sum() / len(Y)
+        Y = Y[~bad_mask]
+        # val = 10.0
+        # Y = torch.nan_to_num(Y, val, posinf=val, neginf=-val)
+        # - torch.log10(1 - bad_ratio) / 10
+        loss = loss_fn(X, Y) - 10 * torch.log10(1 - bad_ratio) # bad_ratio * 5
+        # loss = torch.log10(loss_fn(X, Y)) + torch.log10(loss_fn(X[:, 1:4], Y[:, 1:4])) - torch.log10(1 - bad_ratio)
+        #+ torch.exp(5 * bad_ratio)
 
-        return loss
+        return loss, bad_ratio
 
     def load_validation_data(self, X_vali, Y_vali):
         self.X_vali = self.scaler.transform(X_vali)
@@ -471,7 +483,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
     def train(self,
               n_epochs: int = 100, n_samples=5000, lr=1e-3,
               speculator=None, noise='nsa', SNR=20, noise_model_dir=None,
-              sinkhorn_kwargs={'p': 1, 'blur': 0.01, 'scaling': 0.8}):
+              sinkhorn_kwargs={'p': 1, 'blur': 0.01, 'scaling': 0.8},
+              scheduler=None,):
         """
         Train the neural density estimator using Wasserstein loss.
         """
@@ -486,7 +499,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         for epoch in t:
             self.optimizer.zero_grad()
-            loss = self._get_loss(self.X, speculator, n_samples,
+            loss, bad_ratio = self._get_loss(self.X, speculator, n_samples,
                                   noise, SNR, noise_model_dir, L)
             # Y = self.scaler.transform(
             #     speculator._predict_mag_with_mass_redshift(
@@ -498,12 +511,12 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             self.optimizer.step()
             self.train_loss_history.append(loss.item())
 
-            vali_loss = self._get_loss(self.X_vali, speculator, len(self.X_vali),
+            vali_loss, _ = self._get_loss(self.X_vali, speculator, len(self.X_vali),
                                        noise, SNR, noise_model_dir, L)
             self.vali_loss_history.append(vali_loss.item())
 
             t.set_description(
-                f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali)')
+                f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali), {bad_ratio.item():.3f} (bad ratio)')
 
             # Save the model if the loss is the best so far
             if loss.item() < self.min_loss:
@@ -517,11 +530,13 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                         os.path.join(self.output_dir,
                                      f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
                     )
+            if scheduler is not None:
+                scheduler.step()
 
-    def goodness_of_fit(self, Y_truth):
+    def goodness_of_fit(self, Y_truth, p=2):
         samples = self.sample(len(Y_truth))
         # very close to Wasserstein loss
-        L = SamplesLoss(loss="sinkhorn", p=2, blur=0.001, scaling=0.95)
+        L = SamplesLoss(loss="sinkhorn", p=p, blur=0.001, scaling=0.95)
         self._goodness_of_fit = np.log10(
             L(Y_truth, samples).item())  # The distance in theta space
         print('Log10 Wasserstein distance in theta space: ', self._goodness_of_fit)
