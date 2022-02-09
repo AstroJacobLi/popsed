@@ -33,9 +33,9 @@ def build_maf(
     num_transforms: int = 5,
     embedding_net: nn.Module = nn.Identity(),
     device: str = 'cuda',
-    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2], 
-    'std': [1, 1, 1, 0.05], 
-    'perturb': [0.3, 0.3, 0.3, 0.05]},
+    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2],
+                         'std': [1, 1, 1, 0.05],
+                         'perturb': [0.3, 0.3, 0.3, 0.05]},
     **kwargs,
 ) -> nn.Module:
     """Builds MAF to describe p(x).
@@ -88,7 +88,7 @@ def build_maf(
         transform_init = transforms.AffineTransform(shift=torch.Tensor(-_mean) / torch.Tensor(initial_pos['std']),
                                                     scale=1.0 / torch.Tensor(initial_pos['std']))
         transform = transforms.CompositeTransform([transform_init, transform])
-    
+
     distribution = distributions_.StandardNormal((x_numel,))
     neural_net = flows.Flow(transform, distribution, embedding_net).to(device)
 
@@ -437,7 +437,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
 
-    def build(self, batch_theta: Tensor, batch_X: Tensor,
+    def build(self, batch_theta: Tensor,
+              batch_X: Tensor,
+              filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
               optimizer: str = "adam",
               lr=1e-3, **kwargs):
         """
@@ -457,13 +459,15 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         scaler.fit(batch_X)
         self.scaler = scaler
         self.X = scaler.transform(batch_X).detach()  # z-scored observed SEDs
+        self.filterset = filterset
 
     def _get_loss(self, X, speculator, n_samples,
                   noise, SNR, noise_model_dir,
                   loss_fn):
         Y = self.scaler.transform(
             speculator._predict_mag_with_mass_redshift(
-                self.sample(n_samples), noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+                self.sample(n_samples), filterset=self.filterset,
+                noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
         )
         bad_mask = (torch.isnan(Y).any(dim=1) | torch.isinf(Y).any(dim=1))
         bad_ratio = bad_mask.sum() / len(Y)
@@ -471,11 +475,15 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         # val = 10.0
         # Y = torch.nan_to_num(Y, val, posinf=val, neginf=-val)
         # - torch.log10(1 - bad_ratio) / 10
-        loss = loss_fn(X, Y) - 10 * torch.log10(1 - bad_ratio) # bad_ratio * 5
+        powers = torch.Tensor([200, 200, 200, 200, 200, 1000]).to(self.device)
+        penalty = log_prior(self.sample(n_samples),
+                            torch.Tensor(speculator.bounds).to(self.device), powers).mean()
+        loss = loss_fn(X, Y) + penalty
+        # loss = loss_fn(X, Y) - 10 * torch.log10(1 - bad_ratio) # bad_ratio * 5
         # loss = torch.log10(loss_fn(X, Y)) + torch.log10(loss_fn(X[:, 1:4], Y[:, 1:4])) - torch.log10(1 - bad_ratio)
         #+ torch.exp(5 * bad_ratio)
 
-        return loss, bad_ratio
+        return loss, penalty
 
     def load_validation_data(self, X_vali, Y_vali):
         self.X_vali = self.scaler.transform(X_vali)
@@ -500,7 +508,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         for epoch in t:
             self.optimizer.zero_grad()
             loss, bad_ratio = self._get_loss(self.X, speculator, n_samples,
-                                  noise, SNR, noise_model_dir, L)
+                                             noise, SNR, noise_model_dir, L)
             # Y = self.scaler.transform(
             #     speculator._predict_mag_with_mass_redshift(
             #         self.sample(n_samples), noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
@@ -512,9 +520,11 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             self.train_loss_history.append(loss.item())
 
             vali_loss, _ = self._get_loss(self.X_vali, speculator, len(self.X_vali),
-                                       noise, SNR, noise_model_dir, L)
+                                          noise, SNR, noise_model_dir, L)
             self.vali_loss_history.append(vali_loss.item())
 
+            # t.set_description(
+            #     f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali)')
             t.set_description(
                 f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali), {bad_ratio.item():.3f} (bad ratio)')
 
@@ -662,3 +672,16 @@ def _KL_w2009_eq29(X, Y, silent=True):
     if not silent:
         print('  digamma term = %f' % digamma_term)
     return d_corr + digamma_term + np.log(float(m)/float(n-1))
+
+
+def fuzzy_logic_prior(x, loc, width, power):
+    return -200 * torch.log10(1 / (1 + torch.abs((x - loc) / width)**(power)))
+
+
+def log_prior(theta, bounds, powers):
+    width = (bounds[:, 1] - bounds[:, 0]) / 2
+    loc = (bounds[:, 1] + bounds[:, 0]) / 2
+
+    return torch.vstack([fuzzy_logic_prior(theta[:, i], loc[i], 10 ** (3
+                                                                       / powers[i]) * width[i], powers[i]) for i in
+                         range(len(bounds))]).sum(dim=0)

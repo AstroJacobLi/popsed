@@ -137,7 +137,7 @@ class SpectrumPCA():
         self.PCA = IncrementalPCA(n_components=self.n_pcas)
         # parameter selection (implementing any cuts on strange parts of parameter space)
         self.parameter_selection = parameter_selection
-    
+
     def scale_spectra(self):
         # scale spectra
         log_spec = np.concatenate([np.load(self.log_spectrum_filenames[i])
@@ -215,13 +215,15 @@ def split_chunks(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
+
 def interp_nan(log_spec):
     def nan_helper(y):
-            return np.isnan(y), lambda z: z.nonzero()[0]
+        return np.isnan(y), lambda z: z.nonzero()[0]
     for _spec in log_spec:
         nans, x = nan_helper(_spec)
         _spec[nans] = np.interp(x(nans), x(~nans), _spec[~nans])
     return log_spec
+
 
 class CustomActivation(nn.Module):
     '''
@@ -353,7 +355,9 @@ class Speculator():
         self.prior = {'tage': [0, 14],
                       'logtau': [-3, 3],
                       'logzsol': [-3, 2],
-                      'dust2': [0, 4],}
+                      'dust2': [0, 4],
+                      'logm': [0, 16],
+                      'redshift': [0, 10]}
 
     def _build_distance_interpolator(self):
         """
@@ -389,7 +393,7 @@ class Speculator():
         self.std_sig_grid = std_sig_grid.T.to(self.device)
 
     def load_data(self, pca_coeff, params,
-                  params_name=['tage', 'logtau'],
+                  params_name=['tage', 'logtau', 'logm', 'redshift'],
                   val_frac=0.2, batch_size=32,
                   wave_rest=torch.arange(3000, 11000, 2),
                   wave_obs=torch.arange(3000, 11000, 2)):
@@ -438,9 +442,9 @@ class Speculator():
         self.wave_rest = wave_rest.to(self.device)
         self.wave_obs = wave_obs.to(self.device)
 
-        self.bounds = [self.prior[key] for key in self.params_name]
+        self.bounds = np.array([self.prior[key] for key in self.params_name])
 
-    def train(self, learning_rate=0.002, n_epochs=50, display=False, 
+    def train(self, learning_rate=0.002, n_epochs=50, display=False,
               scheduler=None, scheduler_args=None,):
         """
         Train the NN emulator.
@@ -458,12 +462,13 @@ class Speculator():
         trigger_times = 0
 
         self.optimizer = optim.Adam(self.network.parameters())
-        
+
         if scheduler is not None and scheduler_args is not None:
             scheduler = scheduler(self.optimizer, **scheduler_args)
         else:
-            self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
-        
+            self.optimizer = optim.Adam(
+                self.network.parameters(), lr=learning_rate)
+
         loss_fn = nn.MSELoss()
 
         t = trange(n_epochs,
@@ -501,7 +506,6 @@ class Speculator():
                                 scheduler.step()
 
                     running_loss += loss.item()
-                    
 
                 epoch_loss = running_loss / \
                     len(self.dataloaders[phase].dataset)
@@ -509,7 +513,6 @@ class Speculator():
                     self.train_loss_history.append(epoch_loss)
                 if phase == 'val':
                     self.val_loss_history.append(epoch_loss)
-
 
             if self.train_loss_history[-1] > the_last_loss:
                 trigger_times += 1
@@ -652,13 +655,15 @@ class Speculator():
         # spec[:, 0] = 0.0  # torch.nan
         spec = self.transform(spec, params[:, -1])
 
-        bad_mask = torch.stack([((params[:, :-2] < self.bounds[i][0]) | (params[:, :-2] > self.bounds[i][1]))[
-            :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
+        # I don't directly ban unphysical spectra here. But I add penalty term to the loss function.
 
-        bad_val = -torch.inf  # 1e-24
-        spec[bad_mask] = bad_val
-        spec[(params[:, -1:] < 0.0).squeeze(1)] = bad_val
-        spec[(params[:, -2:-1] < 0.0).squeeze(1)] = bad_val
+        # bad_mask = torch.stack([((params[:, :-2] < self.bounds[i][0]) | (params[:, :-2] > self.bounds[i][1]))[
+        #     :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
+
+        # bad_val = -torch.inf  # 1e-24
+        # spec[bad_mask] = bad_val
+        # spec[(params[:, -1:] < 0.0).squeeze(1)] = bad_val
+        # spec[(params[:, -2:-1] < 0.0).squeeze(1)] = bad_val
 
         return spec
 
@@ -671,6 +676,8 @@ class Speculator():
         return spec
 
     def _calc_transmission(self, filterset):
+        import sys
+        sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
         """Interploate transmission curves to `self.wave_obs`.
         The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
         And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
@@ -756,7 +763,7 @@ class Speculator():
 
         maggies = torch.trapezoid(
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
-            ), self.wave_obs) / self.ab_zero_counts
+             ), self.wave_obs) / self.ab_zero_counts
 
         if noise == 'nsa':
             # Add noise based on NSA noise model.
