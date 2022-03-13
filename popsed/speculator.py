@@ -353,16 +353,16 @@ class Speculator():
         Hard bound prior for the input physical parameters. Such as tage cannot be negative.
         """
         self.prior = {'tage': [0, 14],
-                      'logtau': [-3, 3],
+                      'logtau': [-4, 4],
                       'logzsol': [-3, 2],
-                      'dust2': [0, 4],
+                      'dust2': [0, 5],
                       'logm': [0, 16],
                       'redshift': [0, 10]}
 
     def _build_distance_interpolator(self):
         """
-        Since the `astropy.cosmology` is not differentiable, we build a distance 
-        interpolator which allows us to calculate the luminosity distance at 
+        Since the `astropy.cosmology` is not differentiable, we build a distance
+        interpolator which allows us to calculate the luminosity distance at
         any given redshift in a differentiable way.
 
         Here the cosmology is WMAP9, consistent with `prospector`.
@@ -402,7 +402,7 @@ class Speculator():
 
         Parameters:
             pca_coeff: PCA coefficients of the spectrum data.
-            params: parameters of the spectrum data, such as tage and tau, not include stellar mass. 
+            params: parameters of the spectrum data, such as tage and tau, not include stellar mass.
                 Stellar mass is asssumed to be 1 M_sun.
             val_frac (float): fraction of the data to be used for validation.
             batch_size (int): batch size for training.
@@ -516,7 +516,7 @@ class Speculator():
 
             if self.train_loss_history[-1] > the_last_loss:
                 trigger_times += 1
-                #print('trigger times:', trigger_times)
+                # print('trigger times:', trigger_times)
                 if trigger_times >= patience:
                     print('Early stopping!\nStart to test process.')
                     return
@@ -569,11 +569,11 @@ class Speculator():
         plt.ylabel('Loss')
 
     def transform(self, spectrum_restframe, z):
-        """Redshift a spectrum. Linear interpolation is used. 
+        """Redshift a spectrum. Linear interpolation is used.
         Values outside the interpolation range are linearly interpolated.
 
         Args:
-            spectrum_restframe (torch.Tensor): restframe spectrum, shape = (n_wavelength, n_samples).
+            spectrum_restframe (torch.Tensor): restframe spectrum in linear flux, shape = (n_wavelength, n_samples).
             z (torch.Tensor, or numpy array): redshifts of each spectrum, shape = (n_samples).
 
         Returns:
@@ -595,6 +595,35 @@ class Speculator():
             return spec
         else:
             return spectrum_restframe
+
+    def transform_logspec(self, log_spectrum_restframe, z):
+        """Redshift a spectrum. Linear interpolation is used.
+        Values outside the interpolation range are linearly interpolated.
+
+        Args:
+            spectrum_restframe (torch.Tensor): restframe spectrum in linear flux, shape = (n_wavelength, n_samples).
+            z (torch.Tensor, or numpy array): redshifts of each spectrum, shape = (n_samples).
+
+        Returns:
+            transform function
+        """
+        if not torch.is_tensor(z):
+            z = torch.tensor(z, dtype=torch.float).to(self.device)
+        z = z.squeeze()
+
+        if torch.any(z > 0):
+            wave_redshifted = (self.wave_rest.unsqueeze(1) * (1 + z)).T
+
+            distances = Interp1d()(self.z_grid, self.dist_grid, z)
+            dfactor = ((distances * 1e5)**2 / (1 + z))
+
+            # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
+            # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
+            spec = Interp1d()(wave_redshifted, log_spectrum_restframe,
+                              self.wave_obs) - torch.log10(dfactor.T)
+            return spec
+        else:
+            return log_spectrum_restframe
 
     def predict(self, params):
         """
@@ -619,7 +648,7 @@ class Speculator():
         Predict corresponding spectrum (in linear scale), given physical parameters.
 
         Args:
-            params (torch.Tensor): physical parameters (not including stellar mass and redshift), 
+            params (torch.Tensor): physical parameters (not including stellar mass and redshift),
                 shape = (n_samples, n_params).
             log_stellar_mass (torch.Tensor, or numpy array): log10 stellar mass of each spectrum, shape = (n_samples).
             redshift (torch.Tensor, or numpy array): redshift of each spectrum, shape = (n_samples).
@@ -649,22 +678,27 @@ class Speculator():
         pca_coeff = self.predict(params[:, :-2])  # Assuming 1 M_sun.
         log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
             pca_coeff, device=self.device), device=self.device) + params[:, -2:-1]  # log_spectrum
+        if torch.any(log_spec > 20):
+            print('log spec > 20 params:', params[(log_spec > 20).any(dim=1)])
 
+        log_spec[torch.any(log_spec > 20, dim=1)] = -12
         spec = 10 ** log_spec
         # such that interpolation will not do linear extrapolation.
         # spec[:, 0] = 0.0  # torch.nan
         spec = self.transform(spec, params[:, -1])
 
+        # if torch.any(torch.isnan(spec)):
+        #     print(params[torch.isnan(spec).any(dim=1)])
+        # print('Nan in spec:', torch.isnan(spec).sum())
+        # print('Correpsonding spec:', log_spec[torch.isnan(spec).any(dim=1)])
         # I don't directly ban unphysical spectra here. But I add penalty term to the loss function.
-
-        # bad_mask = torch.stack([((params[:, :-2] < self.bounds[i][0]) | (params[:, :-2] > self.bounds[i][1]))[
+        # bad_mask = torch.stack([((params < self.bounds[i][0]) | (params > self.bounds[i][1]))[
         #     :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
-
-        # bad_val = -torch.inf  # 1e-24
+        # bad_val = 1e-12  # -torch.inf
         # spec[bad_mask] = bad_val
+        # print('Bad mask:', bad_mask.sum())
         # spec[(params[:, -1:] < 0.0).squeeze(1)] = bad_val
         # spec[(params[:, -2:-1] < 0.0).squeeze(1)] = bad_val
-
         return spec
 
     def predict_spec_from_norm_pca(self, y):
@@ -786,6 +820,8 @@ class Speculator():
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
 
+        if torch.isnan(maggies).any() or torch.isinf(maggies).any():
+            print(maggies)
         mags = -2.5 * torch.log10(maggies)
 
         return mags

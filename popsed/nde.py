@@ -233,8 +233,9 @@ def build_nsf(
         transform = transforms.CompositeTransform([transform_zx, transform])
 
     if initial_pos is not None:
-        _mean = np.random.multivariate_normal(
-            initial_pos['mean'], np.diag(initial_pos['perturb']))
+        _mean = np.random.uniform(
+            low=np.array(initial_pos['bounds'])[:, 0], high=np.array(initial_pos['bounds'])[:, 1])
+        print(_mean)
         transform_init = transforms.AffineTransform(shift=torch.Tensor(-_mean) / torch.Tensor(initial_pos['std']),
                                                     scale=1.0 / torch.Tensor(initial_pos['std']))
         transform = transforms.CompositeTransform([transform_init, transform])
@@ -367,12 +368,15 @@ class NeuralDensityEstimator(object):
         """
         return self.net.sample(n_samples)
 
-    def plot_loss(self):
+    def plot_loss(self, min_loss=0.017):
+        # min_loss is the intrinsic minimum loss
         import matplotlib.pyplot as plt
         plt.plot(np.array(self.train_loss_history).flatten(), label='Train loss')
         if hasattr(self, 'vali_loss_history'):
             plt.plot(np.array(self.vali_loss_history).flatten(),
                      label='Validation loss')
+        plt.axhline(y=min_loss, color='r', linestyle='--',
+                    label='Intrinsic minimum')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
@@ -427,6 +431,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             embedding_net=embedding_net,
             **kwargs
         )
+        self.initial_pos = initial_pos
         self.patience = 5
         self.min_loss = 0.1
         self.best_loss_epoch = 0
@@ -439,6 +444,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
     def build(self, batch_theta: Tensor,
               batch_X: Tensor,
+              # batch_size: int = 1000,
               filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
               optimizer: str = "adam",
               lr=1e-3, **kwargs):
@@ -453,6 +459,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             lr (float): learning rate for the optimizer.
 
         """
+        # from torch.utils.data import DataLoader
         super().build(batch_theta, optimizer, lr, **kwargs)
 
         scaler = StandardScaler(device=self.device)
@@ -460,25 +467,39 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         self.scaler = scaler
         self.X = scaler.transform(batch_X).detach()  # z-scored observed SEDs
         self.filterset = filterset
+        # self.batch_size = batch_size
+        # self.train_dataloader = DataLoader(self.X, batch_size=self.batch_size, shuffle=True)
 
     def _get_loss(self, X, speculator, n_samples,
                   noise, SNR, noise_model_dir,
                   loss_fn):
+        sample = self.sample(n_samples)
         Y = self.scaler.transform(
             speculator._predict_mag_with_mass_redshift(
-                self.sample(n_samples), filterset=self.filterset,
+                sample, filterset=self.filterset,
                 noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
         )
-        bad_mask = (torch.isnan(Y).any(dim=1) | torch.isinf(Y).any(dim=1))
-        bad_ratio = bad_mask.sum() / len(Y)
+        bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
+            :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
         Y = Y[~bad_mask]
+        # Y = self.scaler.transform(
+        #     speculator._predict_mag_with_mass_redshift(
+        #         self.sample(n_samples), filterset=self.filterset,
+        #         noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+        # )
+        # bad_mask = (torch.isnan(Y).any(dim=1) | torch.isinf(Y).any(dim=1))
+        # print('Bad mask num', bad_mask.sum())
+        # bad_ratio = bad_mask.sum() / len(Y)
+        # Y = Y[~bad_mask]
         # val = 10.0
         # Y = torch.nan_to_num(Y, val, posinf=val, neginf=-val)
         # - torch.log10(1 - bad_ratio) / 10
-        powers = torch.Tensor([200, 200, 200, 200, 200, 1000]).to(self.device)
-        penalty = log_prior(self.sample(n_samples),
-                            torch.Tensor(speculator.bounds).to(self.device), powers).mean()
+        powers = torch.Tensor([100, 100, 100, 100, 50, 500]).to(self.device)
+        penalty = log_prior(sample,
+                            torch.Tensor(speculator.bounds).to(self.device), powers)
+        penalty = penalty[~torch.isinf(penalty)].mean()
         loss = loss_fn(X, Y) + penalty
+        # print(penalty)
         # loss = loss_fn(X, Y) - 10 * torch.log10(1 - bad_ratio) # bad_ratio * 5
         # loss = torch.log10(loss_fn(X, Y)) + torch.log10(loss_fn(X[:, 1:4], Y[:, 1:4])) - torch.log10(1 - bad_ratio)
         #+ torch.exp(5 * bad_ratio)
@@ -489,17 +510,22 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         self.X_vali = self.scaler.transform(X_vali)
 
     def train(self,
-              n_epochs: int = 100, n_samples=5000, lr=1e-3,
+              n_epochs: int = 100, lr=1e-3,
               speculator=None, noise='nsa', SNR=20, noise_model_dir=None,
               sinkhorn_kwargs={'p': 1, 'blur': 0.01, 'scaling': 0.8},
               scheduler=None,):
         """
         Train the neural density estimator using Wasserstein loss.
         """
+        torch.autograd.set_detect_anomaly(False)
+        from sklearn.model_selection import train_test_split
+
         # Define a Sinkhorn (~Wasserstein) loss between sampled measures
         L = SamplesLoss(loss="sinkhorn", **sinkhorn_kwargs)
+
         # Change learning rate
-        # self.optimizer.param_groups[0]['lr'] = lr
+        if scheduler is not None:
+            self.optimizer.param_groups[0]['lr'] = lr
 
         t = trange(n_epochs,
                    desc='Training NDE_theta using Wasserstein loss',
@@ -507,26 +533,26 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         for epoch in t:
             self.optimizer.zero_grad()
-            loss, bad_ratio = self._get_loss(self.X, speculator, n_samples,
+            # try:
+            # torch.save(self.net.state_dict(), 'temp.net')
+            X_train, _ = train_test_split(
+                self.X.detach(), test_size=0.3, shuffle=True)
+            n_samples = len(X_train)
+            loss, bad_ratio = self._get_loss(X_train, speculator, n_samples,
                                              noise, SNR, noise_model_dir, L)
-            # Y = self.scaler.transform(
-            #     speculator._predict_mag_with_mass_redshift(
-            #         self.sample(n_samples), noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
-            # )
-            # Y = torch.nan_to_num(Y, 0.0)
-            # loss = torch.log10(L(self.X, Y))
+            t.set_description(
+                f'Loss = {loss.item():.3f} (train), {bad_ratio.item():.3f} (bad ratio)')
             loss.backward()
             self.optimizer.step()
             self.train_loss_history.append(loss.item())
-
             vali_loss, _ = self._get_loss(self.X_vali, speculator, len(self.X_vali),
                                           noise, SNR, noise_model_dir, L)
             self.vali_loss_history.append(vali_loss.item())
 
             # t.set_description(
             #     f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali)')
-            t.set_description(
-                f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali), {bad_ratio.item():.3f} (bad ratio)')
+            # t.set_description(
+            #     f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali), {bad_ratio.item():.3f} (bad ratio)')
 
             # Save the model if the loss is the best so far
             if loss.item() < self.min_loss:
@@ -542,6 +568,12 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                     )
             if scheduler is not None:
                 scheduler.step()
+
+            # except Exception as e:
+            #     print(e)
+            #     print("Restoring previous state")
+            #     # self.net.load_state_dict(torch.load('temp.net'))
+            #     continue
 
     def goodness_of_fit(self, Y_truth, p=2):
         samples = self.sample(len(Y_truth))
@@ -675,13 +707,14 @@ def _KL_w2009_eq29(X, Y, silent=True):
 
 
 def fuzzy_logic_prior(x, loc, width, power):
-    return -200 * torch.log10(1 / (1 + torch.abs((x - loc) / width)**(power)))
+    return -100 * torch.log10(1 / (1 + torch.abs((x - loc) / width)**(power)))
 
 
 def log_prior(theta, bounds, powers):
     width = (bounds[:, 1] - bounds[:, 0]) / 2
     loc = (bounds[:, 1] + bounds[:, 0]) / 2
-
-    return torch.vstack([fuzzy_logic_prior(theta[:, i], loc[i], 10 ** (3
+    index = torch.ones_like(loc) * 3
+    index[-1] = 2
+    return torch.vstack([fuzzy_logic_prior(theta[:, i], loc[i], 10 ** (index[i]
                                                                        / powers[i]) * width[i], powers[i]) for i in
-                         range(len(bounds))]).sum(dim=0)
+                         range(len(bounds))]).mean(dim=0)
