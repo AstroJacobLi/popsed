@@ -18,7 +18,7 @@ from torch.nn.parameter import Parameter
 from torch.utils.data import TensorDataset, DataLoader
 from torchinterp1d import Interp1d
 
-from scipy.interpolate import interp1d
+from scipy.interpolate import InterpolatedUnivariateSpline, interp1d
 
 from sedpy import observate
 
@@ -298,10 +298,10 @@ class Network(nn.Module):
                         FC(input_size, hidden_size[i]))
             elif i <= self.n_layers - 1:
                 setattr(self, 'layer_' + str(i),
-                        FC(hidden_size[i-1], hidden_size[i]))
+                        FC(hidden_size[i - 1], hidden_size[i]))
             else:
                 setattr(self, 'layer_' + str(i),
-                        FC(hidden_size[i-1], output_size))
+                        FC(hidden_size[i - 1], output_size))
 
     def forward(self, x):
         for i in range(0, self.n_layers + 1):
@@ -587,6 +587,7 @@ class Speculator():
             wave_redshifted = (self.wave_rest.unsqueeze(1) * (1 + z)).T
 
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
+            # 1e5 because the absolute mag is 10pc.
             dfactor = ((distances * 1e5)**2 / (1 + z))
 
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value

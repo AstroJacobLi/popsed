@@ -1,6 +1,8 @@
 """
 This file contains functions to generate mock SED/spectrum, i.e., the forward model.
-From 
+Taken from https://github.com/bd-j/exspect
+This file only works for tau-model SFH.
+
 """
 from copy import deepcopy
 import numpy as np
@@ -55,7 +57,7 @@ def build_model(uniform_priors=False, add_neb=False, add_duste=False, add_dustab
             model_params["agn_tau"]["isfree"] = True
 
     if add_dustabs:
-         # Calzetti et al. (2000) attenuation curve
+        # Calzetti et al. (2000) attenuation curve
         model_params["dust_type"]["init"] = 2
         model_params["dust2"]["init"] = 0.0
         model_params["dust2"]["prior"] = priors.TopHat(mini=-1, maxi=0.4)
@@ -103,7 +105,8 @@ def build_model(uniform_priors=False, add_neb=False, add_duste=False, add_dustab
         model_params["mass"]["prior"] = priors.TopHat(
             mini=minit/10., maxi=minit*10)
 
-    model_params["logzsol"]["prior"] = priors.TopHat(mini=-1.98, maxi=0.19) # should be a mass-dependent ClippedNormal
+    model_params["logzsol"]["prior"] = priors.TopHat(
+        mini=-1.98, maxi=0.19)  # should be a mass-dependent ClippedNormal
     tuniv = cosmo.age(z).to("Gyr").value
     model_params["tage"]["prior"] = priors.TopHat(mini=0.1, maxi=tuniv)
 
