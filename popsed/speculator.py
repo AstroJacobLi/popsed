@@ -2,6 +2,7 @@
 Modified Speculator, based on https://github.com/justinalsing/speculator/blob/master/speculator/speculator.py
 '''
 
+from random import shuffle
 from unittest.mock import NonCallableMagicMock
 import numpy as np
 import pickle
@@ -115,7 +116,7 @@ class SpectrumPCA():
     SPECULATOR PCA compression class, tensor enabled
     """
 
-    def __init__(self, n_parameters, n_wavelengths, n_pcas, log_spectrum_filenames, parameter_selection=None):
+    def __init__(self, n_parameters, n_pcas, log_spectrum_filenames, parameter_selection=None):
         """
         Constructor.
         :param n_parameters: number of SED model parameters (inputs to the network)
@@ -127,7 +128,7 @@ class SpectrumPCA():
 
         # input parameters
         self.n_parameters = n_parameters
-        self.n_wavelengths = n_wavelengths
+        # self.n_wavelengths = n_wavelengths
         self.n_pcas = n_pcas
         self.log_spectrum_filenames = log_spectrum_filenames
 
@@ -141,7 +142,7 @@ class SpectrumPCA():
     def scale_spectra(self):
         # scale spectra
         log_spec = np.concatenate([np.load(self.log_spectrum_filenames[i])
-                                  for i in range(len(self.log_spectrum_filenames))])[:, 500:]
+                                  for i in range(len(self.log_spectrum_filenames))])[:, :]  # 500:
         log_spec = interp_nan(log_spec)
 
         self.logspec_scaler.fit(log_spec)
@@ -184,7 +185,7 @@ class SpectrumPCA():
         # load in the data (and select based on parameter selection if neccessary)
         if self.parameter_selection is None:
             # load spectra and shift+scale
-            log_spectra = np.load(log_spectrum_filename)[:, 500:]
+            log_spectra = np.load(log_spectrum_filename)[:, :]  # 500:
             log_spectra = interp_nan(log_spectra)
             normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
         else:
@@ -192,7 +193,8 @@ class SpectrumPCA():
                 np.load(self.parameter_filename))
 
             # load spectra and shift+scale
-            log_spectra = np.load(log_spectrum_filename)[selection, :][:, 500:]
+            # 500:
+            log_spectra = np.load(log_spectrum_filename)[selection, :][:, :]
             log_spectra = interp_nan(log_spectra)
             normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
 
@@ -314,7 +316,7 @@ class Speculator():
     Emulator for spectrum data. Training is done in restframe.
     """
 
-    def __init__(self, name='TZD',
+    def __init__(self, name='TZD', model='NMF',
                  n_parameters: int = None,
                  pca_filename: str = None,
                  hidden_size: list = None):
@@ -330,6 +332,7 @@ class Speculator():
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu')
         self.name = name
+        self._model = model
         self.n_parameters = n_parameters  # e.g., n_parameters = 9
         self.hidden_size = hidden_size  # e.g., [100, 100, 100]
         self.pca_filename = pca_filename
@@ -352,12 +355,20 @@ class Speculator():
         """
         Hard bound prior for the input physical parameters. Such as tage cannot be negative.
         """
-        self.prior = {'tage': [0, 14],
-                      'logtau': [-4, 4],
-                      'logzsol': [-3, 2],
-                      'dust2': [0, 5],
-                      'logm': [0, 16],
-                      'redshift': [0, 10]}
+        if self._model == 'tau':
+            self.prior = {'tage': [0, 14],
+                          'logtau': [-4, 4],
+                          'logzsol': [-3, 2],
+                          'dust2': [0, 5],
+                          'logm': [0, 16],
+                          'redshift': [0, 10]}
+        elif self._model == 'NMF':
+            self.prior = {'beta1_sfh': [0, 1], 'beta2_sfh': [0, 1], 'beta3_sfh': [0, 1], 'beta4_sfh': [0, 1],
+                          'fburst': [0, 0.8], 'tburst': [1e-2, 13.27],
+                          'logzsol': [-2.6, 0.3],
+                          'dust1': [0, 3], 'dust2': [0, 3], 'dust_index': [-3, 1],
+                          'logm': [0, 16],
+                          'redshift': [0, 1]}
 
     def _build_distance_interpolator(self):
         """
@@ -430,12 +441,13 @@ class Speculator():
 
         train_data, val_data = torch.utils.data.random_split(dataset,
                                                              [train_len, val_len],
-                                                             generator=torch.Generator().manual_seed(24))
+                                                             generator=torch.Generator().manual_seed(42))
 
         dataloaders = {}
         dataloaders['train'] = DataLoader(
             train_data, batch_size=batch_size, shuffle=True)
-        dataloaders['val'] = DataLoader(val_data, batch_size=val_len)
+        dataloaders['val'] = DataLoader(
+            val_data, batch_size=batch_size, shuffle=True)
 
         self.dataloaders = dataloaders
 
@@ -476,8 +488,8 @@ class Speculator():
                    unit='epochs')
 
         for epoch in t:
-            running_loss = 0.0
             for phase in ['train', 'val']:
+                running_loss = 0.0
                 if phase == 'train':
                     self.network.train()  # Set model to training mode
                 else:
@@ -486,7 +498,7 @@ class Speculator():
                 # Iterate over data.
                 for inputs, labels in self.dataloaders[phase]:
                     inputs = Variable(inputs).to(self.device)
-                    labels = Variable(labels).to(self.device)  # .double()
+                    labels = Variable(labels).to(self.device)
 
                     self.optimizer.zero_grad()
 
@@ -507,8 +519,7 @@ class Speculator():
 
                     running_loss += loss.item()
 
-                epoch_loss = running_loss / \
-                    len(self.dataloaders[phase].dataset)
+                epoch_loss = running_loss / len(self.dataloaders[phase])
                 if phase == 'train':
                     self.train_loss_history.append(epoch_loss)
                 if phase == 'val':
@@ -542,7 +553,7 @@ class Speculator():
                 self.best_recon_err_epoch = len(self.train_loss_history) - 1
 
             t.set_description(
-                f'Loss = {self.train_loss_history[-1]:.5f} (train)')
+                f'Loss = {self.train_loss_history[-1]:.5f} (train), {self.val_loss_history[-1]:.5f} (val)')
 
         if display:
             self.plot_loss()
@@ -679,10 +690,9 @@ class Speculator():
         pca_coeff = self.predict(params[:, :-2])  # Assuming 1 M_sun.
         log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
             pca_coeff, device=self.device), device=self.device) + params[:, -2:-1]  # log_spectrum
-        if torch.any(log_spec > 20):
-            print('log spec > 20 params:', params[(log_spec > 20).any(dim=1)])
-
-        log_spec[torch.any(log_spec > 20, dim=1)] = -12
+        # if torch.any(log_spec > 20):
+        #     print('log spec > 20 params:', params[(log_spec > 20).any(dim=1)])
+        # log_spec[torch.any(log_spec > 20, dim=1)] = -12
         spec = 10 ** log_spec
         # such that interpolation will not do linear extrapolation.
         # spec[:, 0] = 0.0  # torch.nan
