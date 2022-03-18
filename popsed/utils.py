@@ -31,6 +31,57 @@ def c_light():  # AA/s
 def jansky_cgs():
     return 1e-23
 
+# --- flux and magnitudes ---
+
+def flux2mag(flux):
+    ''' convert flux in nanomaggies to magnitudes
+    From https://github.com/changhoonhahn/SEDflow/blob/main/src/sedflow/train.py
+    '''
+    if torch.is_tensor(flux):
+        return 22.5 - 2.5 * torch.log10(flux)
+    else:
+        return 22.5 - 2.5 * np.log10(flux)
+
+
+def mag2flux(mag):
+    ''' convert magnitudes to flux in nanomaggies
+    '''
+    return 10**(0.4 * (22.5 - mag))
+
+
+def sigma_flux2mag(sigma_flux, flux):
+    ''' convert sigma_flux to sigma_mag
+    '''
+    if torch.is_tensor(flux):
+        return torch.abs(-2.5 * (sigma_flux) / flux / 2.302585092994046)
+    else:
+        return np.abs(-2.5 * (sigma_flux) / flux / np.log(10))
+
+
+def sigma_mag2flux(sigma_mag, mag):
+    ''' convert sigma_mag to sigma_flux
+    '''
+    flux = mag2flux(mag)
+    if torch.is_tensor(mag):
+        return torch.abs(flux) * torch.abs(-0.4 * 2.302585092994046 * sigma_mag)
+    else:
+        return np.abs(flux) * np.abs(-0.4 * np.log(10) * sigma_mag)
+
+
+def split_chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
+def interp_nan(log_spec):
+    def nan_helper(y):
+        return np.isnan(y), lambda z: z.nonzero()[0]
+    for _spec in log_spec:
+        nans, x = nan_helper(_spec)
+        _spec[nans] = np.interp(x(nans), x(~nans), _spec[~nans])
+    return log_spec
+
 
 def tlookback_bin_edges(tage):
     ''' hardcoded log-spaced lookback time bin edges. Bins have 0.1 log10(Gyr)
