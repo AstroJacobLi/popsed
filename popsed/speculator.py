@@ -2,7 +2,6 @@
 Modified Speculator, based on https://github.com/justinalsing/speculator/blob/master/speculator/speculator.py
 '''
 
-from random import shuffle
 from unittest.mock import NonCallableMagicMock
 import numpy as np
 import pickle
@@ -469,7 +468,7 @@ class Speculator():
         """
         the_last_loss = 1e-3
         min_loss = 1e-2
-        min_recon_err = 1e-2
+        min_recon_err = 2
         patience = 20
         trigger_times = 0
 
@@ -505,10 +504,10 @@ class Speculator():
                     with torch.set_grad_enabled(phase == 'train'):
                         outputs = self.network(inputs)
                         # # Compute loss based on log-spectrum
-                        # outputs = self.pca.inverse_transform(
-                        #     self.pca_scaler.inverse_transform(outputs), device=self.device)
-                        # labels = self.pca.inverse_transform(
-                        #     self.pca_scaler.inverse_transform(labels), device=self.device)
+                        outputs = self.pca.inverse_transform(
+                            self.pca_scaler.inverse_transform(outputs), device=self.device)
+                        labels = self.pca.inverse_transform(
+                            self.pca_scaler.inverse_transform(labels), device=self.device)
                         loss = loss_fn(outputs, labels)
                         # backward + optimize only if in training phase
                         if phase == 'train':
@@ -546,14 +545,14 @@ class Speculator():
                 spec_y = self.predict_spec_from_norm_pca(y)
 
             recon_err = torch.nanmedian(
-                torch.abs((spec - spec_y) / torch.abs(spec_y)))
+                torch.abs((10**spec - 10**spec_y) / torch.abs(10**spec_y))) * 100
             if recon_err < min_recon_err:
                 min_recon_err = recon_err
                 self.save_model('speculator_best_recon_model.pkl')
                 self.best_recon_err_epoch = len(self.train_loss_history) - 1
 
             t.set_description(
-                f'Loss = {self.train_loss_history[-1]:.5f} (train), {self.val_loss_history[-1]:.5f} (val)')
+                f'Loss = {self.train_loss_history[-1]:.5f} (train), {self.val_loss_history[-1]:.5f} (val), {recon_err:.5f} (recon_err)')
 
         if display:
             self.plot_loss()
@@ -692,6 +691,7 @@ class Speculator():
             pca_coeff, device=self.device), device=self.device) + params[:, -2:-1]  # log_spectrum
         # if torch.any(log_spec > 20):
         #     print('log spec > 20 params:', params[(log_spec > 20).any(dim=1)])
+
         # log_spec[torch.any(log_spec > 20, dim=1)] = -12
         spec = 10 ** log_spec
         # such that interpolation will not do linear extrapolation.
