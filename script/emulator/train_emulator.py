@@ -1,7 +1,11 @@
+"""
+Script for training the spectra emulator. 
+The notebook for this script is `popsed/notebooks/forward_model/NMF/spec_phot_emulator.ipynb`.
+"""
+
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-import astropy.units as u
 import os
 import fire
 os.chdir('/scratch/gpfs/jiaxuanl/Data/popsed/')
@@ -9,17 +13,23 @@ import torch
 
 import sys
 sys.path.append('/home/jiaxuanl/Research/popsed/')
-from popsed.speculator import Speculator, interp_nan
+from popsed.speculator import Speculator
 from scipy.stats import norm
 
 
 def _train_emu(i_bin, name='NMF', file_low=0, file_high=15, batch_size=256, rounds=6):
+    training_sed_version = '0.2'
+    
+    if i_bin == 0:
+        raise ValueError("For your purpose, you don't need to train the very blue end of the spectrum.")
+    
     # Load params and specs
     print(f'Loading from file {file_low} to {file_high}')
-    params = np.concatenate([np.load(f'./train_sed_NMF/fsps.NMF.v0.1.theta_unt.seed{i+1}.npy')
+    params = np.concatenate([np.load(f'./train_sed_NMF/fsps.NMF.v{training_sed_version}.theta_unt.seed{i+1}.npy')
                             for i in range(int(file_low), int(file_high))])
     # exclude stellar mass (1 M_\dot), remain redshift (i.e., length of SFH)
     params = params[:, 1:]
+    # In total, 10 parameters as input of the emulator
     print('Number of specs=', len(params))
     print('Parameter dimension=', params.shape)
     wave = np.load('./train_sed_NMF/fsps.wavelength.npy')
@@ -38,11 +48,16 @@ def _train_emu(i_bin, name='NMF', file_low=0, file_high=15, batch_size=256, roun
         '.w7410_60000'
     ][i_bin]
 
+    # Initialize the speculator object, load PCA
     speculator = Speculator(name=f'{name}_{i_bin}', model='NMF', n_parameters=10,
                             pca_filename=f'./train_sed_NMF/fsps.NMF.pca_trained{str_wbin}.pkl',
                             hidden_size=[256, 256, 256, 256])
 
-    fspecs = [f'./train_sed_NMF/fsps.NMF.v0.1.log10spectrum.seed{i+1}{str_wbin}.npy'
+    # Load training spectra in a clever way. Because we train 
+    # the emulator to predict PCA coefficients, we readin 
+    # spectra but only keep the corresponding PCA coefficients.
+    # Otherwise the memory will overflow.
+    fspecs = [f'./train_sed_NMF/fsps.NMF.v{training_sed_version}.log10spectrum.seed{i+1}{str_wbin}.npy'
                            for i in range(int(file_low), int(file_high))]
     pca_coeff = []
     for file in fspecs:
@@ -71,9 +86,9 @@ def _train_emu(i_bin, name='NMF', file_low=0, file_high=15, batch_size=256, roun
         print(f'\n \n #### Round {i}, Learning rate = {lr} ####')
         speculator.train(learning_rate=lr, n_epochs=n)
 
-    # Loss curve
+    # Plot and save the loss curve
     speculator.plot_loss()
-    plt.savefig(f'./speculator_{name}_{i_bin}_loss.png')
+    plt.savefig(f'./{name}_emulator_{str_wbin}_loss.png')
     plt.close()
 
     # Validation

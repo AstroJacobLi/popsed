@@ -1,16 +1,16 @@
-start time ... 01:11:26
-N_samples: 10000
+start time ... 16:10:14
+N_samples: 300000
 ncpu: 32
 Initialize NMF-based SPS model
 Input parameters : logmstar, beta1_sfh, beta2_sfh, beta3_sfh, beta4_sfh, fburst, tburst, logzsol, dust1, dust2, dust_index
 Initialize FSPS: burst=True, peraa=False 
 
 Total number of parameters: 12
-Total number of samples in parameter space: 10000
+Total number of samples in parameter space: 300000
 
 ---- Batch 1 ----
-    Saving thetas to /scratch/gpfs/jiaxuanl/Data/popsed/train_sed_NMF/fsps.NMF.v0.1.theta.seed1.npy
-    Saving log10(spectra) to /scratch/gpfs/jiaxuanl/Data/popsed/train_sed_NMF/fsps.NMF.v0.1.log10spectrum.seed1.npy
+    Saving thetas to /scratch/gpfs/jiaxuanl/Data/popsed/train_sed_NMF/nmf_seds/fsps.NMF.v0.2.theta.seed1.npy
+    Saving log10(spectra) to /scratch/gpfs/jiaxuanl/Data/popsed/train_sed_NMF/nmf_seds/fsps.NMF.v0.2.log10spectrum.seed1.npy
 
-Elapsed time = 2378.01 s
-end time ... 01:51:35
+Elapsed time = 6694.61 s
+end time ... 18:02:04

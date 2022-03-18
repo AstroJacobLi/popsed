@@ -6,10 +6,6 @@ import multiprocess as mp
 import pickle
 import numpy as np
 from functools import partial
-import matplotlib.pyplot as plt
-import astropy.units as u
-
-from sedpy.observate import load_filters
 
 mp.freeze_support()
 import os
@@ -21,12 +17,11 @@ from popsed import models, prior
 wave_lo = 1000.
 wave_hi = 60000.
 
-
 def gen_params_nmf_sfh(N_samples, burst=True, random_seed=None):
     """
     Generate SPS parameters using NMF-based SFH (with starburst available),
     a fixed metallicity, and three-parameter dust attenuation.
-    The redshift range is [0, 1], which should be fine for most applications. 
+    The redshift range is [0, 1.5], which should be fine for most of applications. 
     """
     ncomp = 4
     if burst:
@@ -36,7 +31,7 @@ def gen_params_nmf_sfh(N_samples, burst=True, random_seed=None):
             # flat dirichilet priors for SFH
             prior.FlatDirichletPrior(ncomp, label='beta'),
             # uniform priors on the mass fraction of burst
-            prior.UniformPrior(0, 0.8, label='fburst'),
+            prior.UniformPrior(0, 1.0, label='fburst'),
             # uniform priors on star-burst lookback time
             prior.UniformPrior(1e-2, 13.27, label='tburst'),
             # uniform priors on log-metallicity, absolute Z
@@ -48,7 +43,7 @@ def gen_params_nmf_sfh(N_samples, burst=True, random_seed=None):
             # uniform priors on dust_index
             prior.UniformPrior(-3., 1., label='dust_index'),
             # uniformly sample redshift
-            prior.UniformPrior(0., 1, label='redshift')
+            prior.UniformPrior(0., 1.5, label='redshift')
         ])
     else:
         priors = prior.load_priors([
@@ -65,7 +60,7 @@ def gen_params_nmf_sfh(N_samples, burst=True, random_seed=None):
             # uniform priors on dust_index
             prior.UniformPrior(-3., 1., label='dust_index'),
             # uniformly sample redshift
-            prior.UniformPrior(0., 1, label='redshift')
+            prior.UniformPrior(0., 1.5, label='redshift')
         ])
     if random_seed is not None:
         np.random.seed(random_seed)
@@ -80,18 +75,42 @@ def gen_params_nmf_sfh(N_samples, burst=True, random_seed=None):
 
 
 def _fsps_model_wrapper(theta, sps):
+    """
+    Wrapper for getting spectra from FSPS.
+    """
     tage = sps._tage_z_interp(theta[-1])  # convert redshift to t_age
     _, _spec = sps._fsps(theta[:-1], tage)
     return np.log10(_spec[sps.wlim])
 
 
 def gen_spec(ncpu=32, ibatch=1, N_samples=5000, burst=True, peraa=False,
-             name='NMF', version='0.1',
-             dat_dir='/scratch/gpfs/jiaxuanl/Data/popsed/train_sed_NMF/',):
+             name='NMF', version='0.2',
+             dat_dir='/scratch/gpfs/jiaxuanl/Data/popsed/train_sed_NMF/'):
+    """
+    Function for generating spectra using FSPS and NMF-based SFH.
+    
+    Parameters
+    ----------
+    ncpu : int, number of CPUs to use
+    ibatch : int, batch number
+    N_samples : int, number of SEDs to generate
+    burst : bool, whether to include starburst component
+    peraa : bool, whether to output in Lsun/AA. If False, output in Lsun/Hz. Default: False.
+    name : str, name of the model
+    version : str, version of the model
+    dat_dir : str, directory to save the generated SEDs
+
+    Notes
+    -----
+    Version 0.1: fburst is a uniform prior on [0, 0.8]. redshift is a uniform prior on [0, 1.0].
+    Version 0.2: fburst is a uniform prior on [0, 1.0]. redshift is a uniform prior on [0, 1.5].
+    """
+
     start = time.time()
     print('N_samples:', N_samples)
     print('ncpu:', ncpu)
 
+    # Iinitialize FSPS
     sps = models.NMF(burst=burst, peraa=peraa)
     print(f'Initialize FSPS: burst={burst}, peraa={peraa} \n')
     sps._ssp_initiate()
@@ -167,5 +186,5 @@ def gen_spec(ncpu=32, ibatch=1, N_samples=5000, burst=True, peraa=False,
 if __name__ == '__main__':
     fire.Fire(gen_spec)
 
-
+# Example:
 # python gen_spec_nmf.py --ncpu=1 --ibatch=1 --N_samples=5 --burst=True

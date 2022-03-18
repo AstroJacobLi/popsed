@@ -59,4 +59,4 @@ if __name__ == '__main__':
 
 # Now train using 2340000 SEDs.
 # python deploy_train_emulator.py --ibatch=2 --name='NMF.emu' --batch_size=512 --file_low=0 --file_high=25 --rounds=6
-# python deploy_train_emulator.py --ibatch=1 --name='NMF.emu' --batch_size=512 --file_low=0 --file_high=25 --rounds=6
+# python deploy_train_emulator.py --ibatch=0 --name='NMF.emu' --batch_size=512 --file_low=0 --file_high=25 --rounds=6
