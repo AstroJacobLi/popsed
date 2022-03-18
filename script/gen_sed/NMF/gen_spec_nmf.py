@@ -9,12 +9,12 @@ from functools import partial
 import matplotlib.pyplot as plt
 import astropy.units as u
 
-import kuaizi
 from sedpy.observate import load_filters
 
 mp.freeze_support()
-kuaizi.set_env(project='popsed', name='',
-               data_dir='/scratch/gpfs/jiaxuanl/Data')
+import os
+os.chdir('/scratch/gpfs/jiaxuanl/Data/popsed/')
+
 sys.path.append('/home/jiaxuanl/Research/popsed/')
 from popsed import models, prior
 
@@ -99,7 +99,7 @@ def gen_spec(ncpu=32, ibatch=1, N_samples=5000, burst=True, peraa=False,
     wlim = (w_fsps >= wave_lo) & (w_fsps <= wave_hi)
     sps.wlim = wlim
     wave = w_fsps[wlim]
-    np.save('fsps.wavelength.npy', wave)
+    np.save(os.path.join(dat_dir, 'fsps.wavelength.npy'), wave)
 
     # File name for the output
     ftheta = os.path.join(
@@ -112,10 +112,10 @@ def gen_spec(ncpu=32, ibatch=1, N_samples=5000, burst=True, peraa=False,
     # Generate parameters by sampling from the priors
     if ibatch == 'test':
         thetas, thetas_unt = gen_params_nmf_sfh(
-            N_samples, burst=True, random_seed=42)
+            N_samples, burst=burst, random_seed=42)
     else:
         thetas, thetas_unt = gen_params_nmf_sfh(
-            N_samples, burst=True, random_seed=ibatch)
+            N_samples, burst=burst, random_seed=ibatch)
 
     tages = sps._tage_z_interp(thetas[:, -1:])  # convert redshift to t_age
 
