@@ -27,23 +27,24 @@ from . import utils
 
 class StandardScaler:
     """
-    Standard scaler for z-scoring data. 
+    Standard scaler for z-scoring data.
 
     I made this because the sklearn scaler is not compatible with PyTorch tensors.
     """
+
     def __init__(self, mean=None, std=None, epsilon=1e-7, device='cpu'):
         """Standard Scaler for PyTorch tensors.
 
         The class can be used to normalize PyTorch Tensors using native functions.
-        The module does not expect the tensors to be of any specific shape; 
-        as long as the features are the last dimension in the tensor, 
+        The module does not expect the tensors to be of any specific shape;
+        as long as the features are the last dimension in the tensor,
         the module will work fine.
-        
+
         Parameters
         ----------
-        mean: float. The mean of the features. 
+        mean: float. The mean of the features.
             The property will be set after a call to fit.
-        std: float. The standard deviation of the features. 
+        std: float. The standard deviation of the features.
             The property will be set after a call to fit.
         epsilon: float. Used to avoid a Division-By-Zero exception.
         device: str. The device to use for the tensors, either 'cpu' or 'cuda'.
@@ -55,7 +56,7 @@ class StandardScaler:
 
     def fit(self, values):
         """
-        Fit the StandardScaler to the data. i.e. calculate 
+        Fit the StandardScaler to the data. i.e. calculate
         the mean and standard deviation of the data.
 
         Parameters
@@ -76,7 +77,7 @@ class StandardScaler:
 
     def transform(self, values, device=None):
         """
-        Transform the input data to be z-scored, based on 
+        Transform the input data to be z-scored, based on
         the mean and standard deviation calculated during the fit.
 
         Parameters
@@ -98,7 +99,7 @@ class StandardScaler:
 
     def inverse_transform(self, values, device=None):
         """
-        Inverse transform the input data to be un-z-scored, based on 
+        Inverse transform the input data to be un-z-scored, based on
         the mean and standard deviation calculated during the fit.
 
         Parameters
@@ -136,9 +137,9 @@ class SpectrumPCA():
         Parameters
         ----------
         n_pcas: int. The number of principal components to use.
-        log_spectrum_filenames: list of .npy filenames for log spectra 
+        log_spectrum_filenames: list of .npy filenames for log spectra
             (each one is an [n_samples, n_wavelengths] array)
-        parameter_filenames: list of .npy filenames for parameters 
+        parameter_filenames: list of .npy filenames for parameters
             (each one is an [n_samples, n_parameters] array)
         """
         self.n_pcas = n_pcas
@@ -150,7 +151,7 @@ class SpectrumPCA():
 
     def scale_spectra(self):
         """
-        The log spectra need to be z-scored before being fed to the PCA. 
+        The log spectra need to be z-scored before being fed to the PCA.
         This function first train a scaler, then z-score the log spectra.
         """
         log_spec = np.concatenate([np.load(self.log_spectrum_filenames[i])
@@ -162,16 +163,20 @@ class SpectrumPCA():
 
     def train_pca(self, chunk_size=1000):
         """
-        Train the PCA model incrementally. Because of the large size of 
-        training set, we fit the PCA model in chunks. 
+        Train the PCA model incrementally. Because of the large size of
+        training set, we fit the PCA model in chunks.
 
         Parameters
         ----------
         chunk_size: int. The number of spectra used in each step.
         """
         _chunks = list(utils.split_chunks(self.normalized_logspec, chunk_size))
-        for chunk in _chunks:
-            self.PCA.partial_fit(chunk)
+        t = trange(len(_chunks),
+                   desc='Training PCA model',
+                   unit='chunks')
+        for i in t:
+            self.PCA.partial_fit(_chunks[i])
+
         # set the PCA transform matrix
         self.pca_transform_matrix = self.PCA.components_
 
@@ -191,13 +196,12 @@ class SpectrumPCA():
         # inverse transform the PCA coefficients
         if torch.is_tensor(pca_coeffs):
             assert device is not None, 'Provide device name in order to manipulate tensors'
-            return torch.matmul(pca_coeffs.to(device), 
+            return torch.matmul(pca_coeffs.to(device),
                                 Tensor(self.PCA.components_).to(device)
                                 ) + Tensor(self.PCA.mean_).to(device)
         else:
             return np.dot(self.PCA.components_, pca_coeffs) + self.PCA.mean_
 
-    
     def _transform_and_stack_training_data(self, filename, retain=False):
         """
         Transform the training data set to PCA basis.
@@ -230,19 +234,19 @@ class SpectrumPCA():
         log_spectra_in_basis: the reconstructed log spectra.
         """
         # load in the data (and select based on parameter selection if neccessary)
-        if self.parameter_selection is None:
-            # load spectra and shift+scale
-            log_spectra = np.load(log_spectrum_filename)
-            log_spectra = utils.interp_nan(log_spectra)
-            normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
-        else:
-            selection = self.parameter_selection(
-                np.load(self.parameter_filename))
+        # if self.parameter_selection is None:
+        # load spectra and shift+scale
+        log_spectra = np.load(log_spectrum_filename)
+        log_spectra = utils.interp_nan(log_spectra)
+        normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
+        # else:
+        #     selection = self.parameter_selection(
+        #         np.load(self.parameter_filename))
 
-            # load spectra and shift+scale
-            log_spectra = np.load(log_spectrum_filename)[selection, :]
-            log_spectra = utils.interp_nan(log_spectra)
-            normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
+        #     # load spectra and shift+scale
+        #     log_spectra = np.load(log_spectrum_filename)[selection, :]
+        #     log_spectra = utils.interp_nan(log_spectra)
+        #     normalized_log_spectra = self.logspec_scaler.transform(log_spectra)
 
         # transform to PCA basis and back
         log_spectra_pca = self.PCA.transform(normalized_log_spectra)
@@ -328,10 +332,11 @@ def FC(input_size, output_size):
 
 class Network(nn.Module):
     '''
-    Fully connected network. 
-    
+    Fully connected network.
+
     WARNING: **Adding dropout and batch normalization will make things worse.**
     '''
+
     def __init__(self, input_size, hidden_size, output_size):
         super().__init__()
         self.n_layers = len(hidden_size)
@@ -357,6 +362,7 @@ class Speculator():
     """
     An emulator for SPS model.
     """
+
     def __init__(self, name='NMF', model='NMF',
                  n_parameters: int = None,
                  pca_filename: str = None,
@@ -378,7 +384,7 @@ class Speculator():
 
         """
         self.device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu') # default is GPU
+            'cuda' if torch.cuda.is_available() else 'cpu')  # default is GPU
         self.name = name
         self._model = model
         self.n_parameters = n_parameters  # e.g., n_parameters = 9
@@ -402,13 +408,13 @@ class Speculator():
     def _build_params_prior(self):
         """
         Hard bound prior for the input physical parameters.
-        E.g., redshift cannot be negative. 
+        E.g., redshift cannot be negative.
 
         WARNING:
         / This prior should be consistant with the \
         \ prior used in training the emulator.     /
         ----------------------------------------
-                \   ^__^ 
+                \   ^__^
                 \  (oo)\_______
                     (__)\       )\/\
                         ||----w |
@@ -422,7 +428,7 @@ class Speculator():
                           'logm': [0, 16],
                           'redshift': [0, 10]}
         elif self._model == 'NMF':
-            self.prior = {'beta1_sfh': [0, 1], 'beta2_sfh': [0, 1], 
+            self.prior = {'beta1_sfh': [0, 1], 'beta2_sfh': [0, 1],
                           'beta3_sfh': [0, 1], 'beta4_sfh': [0, 1],
                           'fburst': [0, 1.0], 'tburst': [1e-2, 13.27],
                           'logzsol': [-2.6, 0.3],
@@ -447,7 +453,7 @@ class Speculator():
 
     def _parse_nsa_noise_model(self, noise_model_dir):
         """
-        Parse the noise model from the NSA. 
+        Parse the noise model from the NSA.
         The noise model is generated in `popsed/notebook/forward_model/noise_model/``.
 
         Parameters
@@ -478,24 +484,24 @@ class Speculator():
 
         Parameters
         ----------
-        pca_coeff: np.ndarray. 
-            PCA coefficients of the training spectra, shape = (n_samples, n_pca). 
+        pca_coeff: np.ndarray.
+            PCA coefficients of the training spectra, shape = (n_samples, n_pca).
             This is generated using the SpectrumPCA class.
-        params: np.ndarray. 
+        params: np.ndarray.
             Parameters of the training spectra, shape = (n_samples, n_parameters).
-            E.g., (beta1_sfh, beta2_sfh, beta3_sfh, beta4_sfh, fburst, tburst, 
+            E.g., (beta1_sfh, beta2_sfh, beta3_sfh, beta4_sfh, fburst, tburst,
                    logzsol, dust1, dust2, dust_index, redshift)
             NOTE: stellar mass should not be included, because all stellar mass
-                  is asssumed to be 1 M_sun. But redshift (as a proxy of t_age 
+                  is asssumed to be 1 M_sun. But redshift (as a proxy of t_age
                   for NMF-based SFH) should be included.
-        val_frac: float. 
+        val_frac: float.
             Fraction of the training data to be used for validation.
-        batch_size: int. 
-            Batch size for training. Larger batch size will speed up training 
-            but require more memory and larger learning rates. 
+        batch_size: int.
+            Batch size for training. Larger batch size will speed up training
+            but require more memory and larger learning rates.
             The current best batch size is 512.
-        wave_rest: torch.Tensor. Restframe wavelength of the input spectra, as a tensor. 
-        wave_obs: torch.Tensor. Observed wavelength of the input spectra, as a tensor. 
+        wave_rest: torch.Tensor. Restframe wavelength of the input spectra, as a tensor.
+        wave_obs: torch.Tensor. Observed wavelength of the input spectra, as a tensor.
         """
         self.params_name = params_name
 
@@ -533,15 +539,14 @@ class Speculator():
 
         self.bounds = np.array([self.prior[key] for key in self.params_name])
 
-
-    def train(self, 
-              learning_rate=1e-3, 
-              n_epochs=50, 
+    def train(self,
+              learning_rate=1e-3,
+              n_epochs=50,
               display=False,
-              scheduler=None, 
+              scheduler=None,
               scheduler_args=None):
         """
-        Train the network in emulator, using Adam optimizer, 
+        Train the network in emulator, using Adam optimizer,
         and MSE loss on the z-scored log10 spec (not on PCA coeffs).
 
         Parameters
@@ -576,7 +581,7 @@ class Speculator():
 
         for epoch in t:
             for phase in ['train', 'val']:
-                running_loss = 0.0 # the accumulative loss in one epoch
+                running_loss = 0.0  # the accumulative loss in one epoch
                 if phase == 'train':
                     self.network.train()  # Set model to training mode
                 else:
@@ -597,9 +602,9 @@ class Speculator():
                             self.pca_scaler.inverse_transform(outputs), device=self.device)
                         labels = self.pca.inverse_transform(
                             self.pca_scaler.inverse_transform(labels), device=self.device)
-                        
+
                         loss = loss_fn(outputs, labels)
-                        
+
                         # backward + optimize only in training phase
                         if phase == 'train':
                             loss.backward()
@@ -650,11 +655,11 @@ class Speculator():
         print(
             'Epoch: {} - {} Train Loss: {:.6f}'.format(
                 len(self.train_loss_history), phase, self.train_loss_history[-1])
-                )
+        )
         print(
             'Epoch: {} - {} Vali Loss: {:.6f}'.format(
                 len(self.val_loss_history), phase, self.val_loss_history[-1])
-                )
+        )
         print(f'Recon error: {recon_err.item():.6f}')
         if scheduler is not None:
             print('lr:', scheduler.get_lr())
@@ -674,18 +679,18 @@ class Speculator():
 
     def transform(self, spectra_restframe, z, islog=True):
         """
-        Redshift spectra. 
-        Linear interpolation is used. Values outside 
+        Redshift spectra.
+        Linear interpolation is used. Values outside
         the interpolation range are linearly interpolated.
 
         Parameters
         ----------
-        spectra_restframe: torch.Tensor. 
+        spectra_restframe: torch.Tensor.
             Restframe spectra in **linear** flux, shape = (n_wavelength, n_samples).
-        z: torch.Tensor or np.ndarray. 
+        z: torch.Tensor or np.ndarray.
             Redshifts of each spectra, shape = (n_samples,).
-        islog: bool. 
-            Whether the input spectra is in log10-flux. 
+        islog: bool.
+            Whether the input spectra is in log10-flux.
             If True, the output spectra is also in log10-flux.
 
         Returns
@@ -706,7 +711,8 @@ class Speculator():
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
             if islog:
-                spec = Interp1d()(wave_redshifted, spectra_restframe, self.wave_obs) - torch.log10(dfactor.T)
+                spec = Interp1d()(wave_redshifted, spectra_restframe,
+                                  self.wave_obs) - torch.log10(dfactor.T)
             else:
                 spec = Interp1d()(wave_redshifted, spectra_restframe, self.wave_obs) / dfactor.T
             return spec
@@ -763,7 +769,7 @@ class Speculator():
 
         Parameters
         ----------
-        params: torch.Tensor. 
+        params: torch.Tensor.
             SPS physical parameters, including stellar mass. shape = (n_samples, n_params).
             params[:, :-2] are the SPS physical parameters NOT including stellar mass and redshift.
                 If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
@@ -772,20 +778,21 @@ class Speculator():
 
         Returns
         -------
-        spec: torch.Tensor. 
+        spec: torch.Tensor.
             Predicted spectra in linear scales, shape = (n_wavelength, n_samples).
         """
         pca_coeff = self.predict(params[:, :-2])  # Assuming 1 M_sun.
         log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
-            pca_coeff, device=self.device), device=self.device) + params[:, -2:-1] # added log_stellar_mass
-        
+            pca_coeff, device=self.device), device=self.device) + params[:, -2:-1]  # added log_stellar_mass
+
         # if torch.any(log_spec > 20):
         #     print('log spec > 20 params:', params[(log_spec > 20).any(dim=1)])
         # log_spec[torch.any(log_spec > 20, dim=1)] = -12
         # such that interpolation will not do linear extrapolation.
         # spec[:, 0] = 0.0  # torch.nan
+        # spec = self.transform(10**log_spec, params[:, -1:], islog=False)
         spec = 10**self.transform(log_spec, params[:, -1], islog=True)
-        
+
         # if torch.any(torch.isnan(spec)):
         #     print(params[torch.isnan(spec).any(dim=1)])
         # print('Nan in spec:', torch.isnan(spec).sum())
@@ -813,7 +820,7 @@ class Speculator():
         sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
 
         """
-        Interploate and evaluate transmission curves at `self.wave_obs`. 
+        Interploate and evaluate transmission curves at `self.wave_obs`.
         Also calculate the zeropoint in each filter.
         The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
         And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
@@ -850,7 +857,7 @@ class Speculator():
             shape = (n_samples, n_params).
         log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
         redshift: torch.Tensor or np.ndarray. Redshift of each spectrum, shape = (n_samples).
-        kwargs: you can pass filterset and noise model here. See `self._predict_mag_with_mass_redshift`. 
+        kwargs: you can pass filterset and noise model here. See `self._predict_mag_with_mass_redshift`.
 
         Returns
         -------
@@ -870,19 +877,19 @@ class Speculator():
 
         Parameters
         ----------
-        params: torch.Tensor. 
+        params: torch.Tensor.
             SPS physical parameters, including stellar mass. shape = (n_samples, n_params).
             params[:, :-2] are the SPS physical parameters NOT including stellar mass and redshift.
                 If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
             params[:, -2:-1] is the log10 stellar mass.
             params[:, -1:] is the redshift, used to shift and dim the spectra.
 
-        filterset: list. 
+        filterset: list.
             List of filters to predict photometry, default = ['sdss_{0}0'.format(b) for b in 'ugriz'].
-        nosie: str. 
-            Whether to add noise to the predicted photometry. 
+        nosie: str.
+            Whether to add noise to the predicted photometry.
             If `noise=None`, no noise is added.
-            If `noise='nsa'`, we add noise based on NSA catalog. 
+            If `noise='nsa'`, we add noise based on NSA catalog.
             If `noise='snr'`, we add noise with constant SNR. Therefore, SNR must be provided.
         noise_model_dir: str.
             The directory of the noise model. Only works if `noise='nsa'`.
@@ -891,7 +898,7 @@ class Speculator():
             Only works if `noise='snr'`.
 
         Returns:
-            mags: torch.Tensor. 
+            mags: torch.Tensor.
                 Predicted photometry, shape = (n_bands, n_samples).
         """
         if hasattr(self, 'filterset') and self.filterset != filterset:
@@ -952,3 +959,187 @@ class Speculator():
         """
         with open(filename.replace('.pkl', '') + '_' + self.name + '.pkl', 'wb') as f:
             pickle.dump(self, f)
+
+
+class SuperSpeculator():
+    """
+    A class to combine different speculators trained for certain wavelengths.
+    """
+
+    def __init__(self, speculators_dir=None, str_wbin=[
+        '.w2000_3600',
+        '.w3600_5500',
+        '.w5500_7410',
+        '.w7410_60000'
+    ], wavelength=None, device='cuda'):
+        speculators = []
+        for file in speculators_dir:
+            with open(file, 'rb') as f:
+                speculators.append(pickle.load(f))
+
+        for _speculator in speculators:
+            _speculator.network.eval()
+
+        self.speculators = speculators
+        self.str_wbin = str_wbin
+        self.device = device
+        self.wavelength = torch.Tensor(wavelength).to(self.device)
+        self._build_distance_interpolator()
+
+    def _build_distance_interpolator(self):
+        """
+        Since the `astropy.cosmology` is not differentiable, we build a distance
+        interpolator which allows us to calculate the luminosity distance at
+        any given redshift in a differentiable way.
+
+        Here the cosmology is Planck15, NOT consistent with `prospector`.
+        """
+        from astropy.cosmology import Planck15 as cosmo
+        z_grid = torch.arange(0, 5, 0.001)
+        dist_grid = torch.Tensor(
+            cosmo.luminosity_distance(z_grid).value)  # Mpc
+        self.z_grid = z_grid.to(self.device)
+        self.dist_grid = dist_grid.to(self.device)
+
+    def predict(self, params):
+        """
+        Predict the PCA coefficients of the spectrum, given the SPS physical parameters.
+        Note: this is in restframe, and the spectrum is scaled to 1 M_sun.
+
+        Parameters
+        ----------
+        params (torch.Tensor): SPS physical parameters, shape = (n_samples, n_params).
+
+        Returns
+        -------
+        pca_coeff (torch.Tensor): PCA coefficients, shape = (n_samples, n_pca_coeffs).
+        """
+        if not torch.is_tensor(params):
+            params = torch.Tensor(params).to(self.device)
+        params = params.to(self.device)
+
+        return torch.hstack([_speculator.predict(params) for _speculator in self.speculators])
+
+    def _predict_spec_restframe(self, params, log_stellar_mass=None):
+        """
+        Predict the corresponding spectra (in linear scale) for given physical parameters.
+        The predicted spectra are in restframe.
+
+        Parameters
+        ----------
+        params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
+            shape = (n_samples, n_params).
+        log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
+
+        Returns
+        -------
+        spec: torch.Tensor. The predicted spectra, shape = (n_wavelength, n_samples).
+        """
+        if not torch.is_tensor(params):
+            params = torch.Tensor(params).to(self.device)
+        params = params.to(self.device)
+        if log_stellar_mass is None:
+            log_stellar_mass = torch.zeros_like(params[:, 0:1])
+
+        redshift = torch.zeros_like(params[:, 0:1])
+
+        return torch.hstack(
+            [_speculator.predict_spec(
+                params, log_stellar_mass=log_stellar_mass, redshift=redshift
+            ) for _speculator in self.speculators])
+
+    def transform(self, spectra_restframe, z, islog=False):
+        """
+        Redshift spectra.
+        Linear interpolation is used. Values outside
+        the interpolation range are linearly interpolated.
+        **We have to redshift the spectra after combining them in restframe.**
+
+        Parameters
+        ----------
+        spectra_restframe: torch.Tensor.
+            Restframe spectra in **linear** flux, shape = (n_wavelength, n_samples).
+        z: torch.Tensor or np.ndarray.
+            Redshifts of each spectra, shape = (n_samples,).
+        islog: bool.
+            Whether the input spectra is in log10-flux.
+            If True, the output spectra is also in log10-flux.
+
+        Returns
+        -------
+        spectra_transformed: torch.Tensor. Redshifted spectra.
+        """
+        if not torch.is_tensor(z):
+            z = torch.tensor(z, dtype=torch.float).to(self.device)
+        z = z.squeeze()
+
+        if torch.any(z > 0):
+            wave_redshifted = (self.wavelength.unsqueeze(1) * (1 + z)).T
+
+            distances = Interp1d()(self.z_grid, self.dist_grid, z)
+            # 1e5 because the absolute mag is 10pc.
+            dfactor = ((distances * 1e5)**2 / (1 + z))
+
+            # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
+            # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
+            if islog:
+                spec = Interp1d()(wave_redshifted, spectra_restframe,
+                                  self.wavelength) - torch.log10(dfactor.T)
+            else:
+                spec = Interp1d()(wave_redshifted, spectra_restframe, self.wavelength) / dfactor.T
+            return spec
+        else:
+            return spectra_restframe
+
+    def _predict_spec_with_mass_redshift(self, params):
+        """
+        Predict the corresponding spectra (in linear scale) for given physical parameters.
+        **We have to redshift the spectra after combining them in restframe.**
+
+        Parameters
+        ----------
+        params: torch.Tensor.
+            SPS physical parameters, including stellar mass. shape = (n_samples, n_params).
+            params[:, :-2] are the SPS physical parameters NOT including stellar mass and redshift.
+                If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
+            params[:, -2:-1] is the log10 stellar mass.
+            params[:, -1:] is the redshift, used to shift and dim the spectra.
+
+        Returns
+        -------
+        spec: torch.Tensor.
+            Predicted spectra in linear scales, shape = (n_wavelength, n_samples).
+        """
+        if not torch.is_tensor(params):
+            params = torch.Tensor(params).to(self.device)
+        params = params.to(self.device)
+        spec_rest = self._predict_spec_restframe(
+            params[:, :-2], log_stellar_mass=params[:, -2:-1])  # restframe
+        spec = self.transform(spec_rest, params[:, -1:], islog=False)
+        return spec
+
+    def predict_spec(self, params, log_stellar_mass=None, redshift=None):
+        """
+        Predict the corresponding spectra (in linear scale) for given physical parameters.
+        The predicted spectra are in restframe.
+
+        Parameters
+        ----------
+        params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
+            shape = (n_samples, n_params).
+        log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
+        redshift: torch.Tensor or np.ndarray. Redshift of each spectrum, shape = (n_samples).
+
+        Returns
+        -------
+        spec: torch.Tensor. The predicted spectra, shape = (n_wavelength, n_samples).
+        """
+        if not torch.is_tensor(params):
+            params = torch.Tensor(params).to(self.device)
+        params = params.to(self.device)
+        if log_stellar_mass is None:
+            log_stellar_mass = torch.zeros_like(params[:, 0:1])
+        if redshift is None:
+            redshift = torch.zeros_like(params[:, 0:1])
+
+        return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device))
