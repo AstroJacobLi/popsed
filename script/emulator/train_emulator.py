@@ -19,20 +19,21 @@ from scipy.stats import norm
 
 def _train_emu(i_bin, name='NMF', file_low=0, file_high=15, batch_size=256, rounds=6):
     training_sed_version = '0.2'
-    
-    if i_bin == 0:
-        raise ValueError("For your purpose, you don't need to train the very blue end of the spectrum.")
-    
+
+    # if i_bin == 0:
+    #     raise ValueError(
+    #         "For your purpose, you don't need to train the very blue end of the spectrum.")
+
     # Load params and specs
     print(f'Loading from file {file_low} to {file_high}')
-    params = np.concatenate([np.load(f'./train_sed_NMF/fsps.NMF.v{training_sed_version}.theta_unt.seed{i+1}.npy')
+    params = np.concatenate([np.load(f'./train_sed_NMF/nmf_seds/fsps.NMF.v{training_sed_version}.theta_unt.seed{i+1}.npy')
                             for i in range(int(file_low), int(file_high))])
     # exclude stellar mass (1 M_\dot), remain redshift (i.e., length of SFH)
     params = params[:, 1:]
     # In total, 10 parameters as input of the emulator
     print('Number of specs=', len(params))
     print('Parameter dimension=', params.shape)
-    wave = np.load('./train_sed_NMF/fsps.wavelength.npy')
+    wave = np.load('./train_sed_NMF/nmf_seds/fsps.wavelength.npy')
     wave_bin = [
         (wave >= 1000) & (wave < 2000),
         (wave >= 2000) & (wave < 3600),
@@ -50,18 +51,19 @@ def _train_emu(i_bin, name='NMF', file_low=0, file_high=15, batch_size=256, roun
 
     # Initialize the speculator object, load PCA
     speculator = Speculator(name=f'{name}_{i_bin}', model='NMF', n_parameters=10,
-                            pca_filename=f'./train_sed_NMF/fsps.NMF.pca_trained{str_wbin}.pkl',
-                            hidden_size=[256, 256, 256, 256])
+                            pca_filename=f'./train_sed_NMF/nmf_seds/fsps.NMF.pca_trained{str_wbin}.pkl',
+                            hidden_size=[256, 256, 256, 256, 256])
 
-    # Load training spectra in a clever way. Because we train 
-    # the emulator to predict PCA coefficients, we readin 
+    # Load training spectra in a clever way. Because we train
+    # the emulator to predict PCA coefficients, we readin
     # spectra but only keep the corresponding PCA coefficients.
     # Otherwise the memory will overflow.
-    fspecs = [f'./train_sed_NMF/fsps.NMF.v{training_sed_version}.log10spectrum.seed{i+1}{str_wbin}.npy'
-                           for i in range(int(file_low), int(file_high))]
+    fspecs = [f'./train_sed_NMF/nmf_seds/fsps.NMF.v{training_sed_version}.log10spectrum.seed{i+1}{str_wbin}.npy'
+              for i in range(int(file_low), int(file_high))]
     pca_coeff = []
     for file in fspecs:
-        pca_coeff.append(speculator.pca.PCA.transform(speculator.pca.logspec_scaler.transform(np.load(file, mmap_mode='r'))))
+        pca_coeff.append(speculator.pca.PCA.transform(
+            speculator.pca.logspec_scaler.transform(np.load(file, mmap_mode='r'))))
     pca_coeff = np.concatenate(pca_coeff)
     print('PCA coeff shape=', pca_coeff.shape)
 
@@ -77,7 +79,7 @@ def _train_emu(i_bin, name='NMF', file_low=0, file_high=15, batch_size=256, roun
 
     # Training
     print('Now training emulator with batch_size =', batch_size)
-    lrs = np.array([1e-3, 5e-4, 1e-4, 5e-5, 1e-5])[:int(rounds)]
+    lrs = np.array([1e-3, 5e-4, 1e-4, 5e-5, 1e-5, 5e-6])[:int(rounds)]
     n_ep = [100 for _ in lrs]
 
     i = 0
@@ -94,8 +96,9 @@ def _train_emu(i_bin, name='NMF', file_low=0, file_high=15, batch_size=256, roun
     # Validation
     _specs = speculator.predict_spec(torch.Tensor(
         params[val_ind]).to('cuda')).cpu().detach().numpy()
-    
-    val_logspec = speculator.pca.logspec_scaler.inverse_transform(speculator.pca.PCA.inverse_transform(pca_coeff[val_ind]))
+
+    val_logspec = speculator.pca.logspec_scaler.inverse_transform(
+        speculator.pca.PCA.inverse_transform(pca_coeff[val_ind]))
     diff = (10**val_logspec - _specs) / 10**val_logspec * 100
 
     x = wave[wave_bin] / 10

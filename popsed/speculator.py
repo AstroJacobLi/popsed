@@ -362,6 +362,7 @@ class Speculator():
     """
     An emulator for SPS model.
     """
+    from .models import lightspeed, to_cgs_at_10pc, jansky_cgs
 
     def __init__(self, name='NMF', model='NMF',
                  n_parameters: int = None,
@@ -756,6 +757,9 @@ class Speculator():
         Returns
         -------
         spec: torch.Tensor. The predicted spectra, shape = (n_wavelength, n_samples).
+            **Notice** that if `self._model == "NMF"`, the output spectra is in unit of Lsun/Hz.
+            To convert from L_sun/Hz to L_sun/AA, multiply L_sun/Hz by lightspeed / wave**2.
+            To convert L_sun/Hz to erg/s/cm^2/AA at 10 pc, multiply by `to_cgs_at_10pc`.
         """
         if log_stellar_mass is None:
             log_stellar_mass = torch.zeros_like(params[:, 0:1])
@@ -780,6 +784,9 @@ class Speculator():
         -------
         spec: torch.Tensor.
             Predicted spectra in linear scales, shape = (n_wavelength, n_samples).
+            **Notice** that if `self._model == "NMF"`, the output spectra is in unit of Lsun/Hz.
+            To convert from L_sun/Hz to L_sun/AA, multiply L_sun/Hz by lightspeed / wave**2.
+            To convert L_sun/Hz to erg/s/cm^2/AA at 10 pc, multiply by `to_cgs_at_10pc`.
         """
         pca_coeff = self.predict(params[:, :-2])  # Assuming 1 M_sun.
         log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
@@ -863,6 +870,9 @@ class Speculator():
         -------
         mag: torch.Tensor. The predicted magnitudes, shape = (n_wavelength, n_samples).
         """
+        if not torch.is_tensor(params):
+            params = torch.Tensor(params).to(self.device)
+        params = params.to(self.device)
         if log_stellar_mass is None:
             log_stellar_mass = torch.zeros_like(params[:, 0:1])
         if redshift is None:
@@ -911,11 +921,21 @@ class Speculator():
             self._calc_transmission(filterset)
 
         # get magnitude from a spectrum
-        lightspeed = 2.998e18  # AA/s
-        jansky_cgs = 1e-23
+        # Note that if the SPS model is NMF, the output spectra from `self._predict_spec_with_mass_redshift`
+        # are in unit of Lsun/Hz dimmed by `dfactor` in `self.transform`. We need to convert
+        # to Lsun/AA, then to erg/s/AA at 10pc.
+        # If SPS model is tau, no problem exists.
 
-        _spec = self._predict_spec_with_mass_redshift(
-            params) * lightspeed / self.wave_obs**2 * (3631 * jansky_cgs)  # in cgs/AA units
+        if self._model == 'NMF':
+            _spec = self._predict_spec_with_mass_redshift(
+                params) * self.lightspeed / self.wave_obs**2 * self.to_cgs_at_10pc
+        elif self._model == 'tau':
+            _spec = self._predict_spec_with_mass_redshift(
+                params) * self.lightspeed / self.wave_obs**2 * (3631 * self.jansky_cgs)  # in cgs/AA units
+        else:
+            raise NotImplementedError(
+                'SPS model {} is not implemented.'.format(self._model))
+
         _spec = torch.nan_to_num(_spec, 0.0)
 
         maggies = torch.trapezoid(
@@ -966,6 +986,8 @@ class SuperSpeculator():
     A class to combine different speculators trained for certain wavelengths.
     """
 
+    from .models import lightspeed, to_cgs_at_10pc
+
     def __init__(self, speculators_dir=None, str_wbin=[
         '.w2000_3600',
         '.w3600_5500',
@@ -979,7 +1001,9 @@ class SuperSpeculator():
 
         for _speculator in speculators:
             _speculator.network.eval()
+            assert _speculator._model == 'NMF', 'Only NMF model is supported.'
 
+        self._model = 'NMF'
         self.speculators = speculators
         self.str_wbin = str_wbin
         self.device = device
@@ -1000,6 +1024,38 @@ class SuperSpeculator():
             cosmo.luminosity_distance(z_grid).value)  # Mpc
         self.z_grid = z_grid.to(self.device)
         self.dist_grid = dist_grid.to(self.device)
+
+    def _calc_transmission(self, filterset):
+        import sys
+        sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
+
+        """
+        Interploate and evaluate transmission curves at `self.wave_obs`.
+        Also calculate the zeropoint in each filter.
+        The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
+        And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
+
+        Parameters
+        ----------
+        filterset: list of strings.
+            Names of filters, e.g., ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
+            You can look up at available filters using `sedpy.observate.list_available_filters`.
+        """
+        x = self.wavelength.cpu().detach().numpy()
+
+        # transmission efficiency
+        _epsilon = np.zeros((len(filterset), len(x)))
+        _zero_counts = np.zeros(len(filterset))
+        filters = observate.load_filters(filterset)
+        for i in range(len(filterset)):
+            _epsilon[i] = interp1d(filters[i].wavelength,
+                                   filters[i].transmission,
+                                   bounds_error=False,
+                                   fill_value=0)(x)
+            _zero_counts[i] = filters[i].ab_zero_counts
+        self.filterset = filterset
+        self.transmission_effiency = Tensor(_epsilon).to(self.device)
+        self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 
     def predict(self, params):
         """
@@ -1143,3 +1199,114 @@ class SuperSpeculator():
             redshift = torch.zeros_like(params[:, 0:1])
 
         return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device))
+
+    def _predict_mag_with_mass_redshift(self, params,
+                                        filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
+                                        noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10):
+        """
+        Predict corresponding photometry (in magnitude), given SPS physical parameters.
+
+        Parameters
+        ----------
+        params: torch.Tensor.
+            SPS physical parameters, including stellar mass. shape = (n_samples, n_params).
+            params[:, :-2] are the SPS physical parameters NOT including stellar mass and redshift.
+                If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
+            params[:, -2:-1] is the log10 stellar mass.
+            params[:, -1:] is the redshift, used to shift and dim the spectra.
+
+        filterset: list.
+            List of filters to predict photometry, default = ['sdss_{0}0'.format(b) for b in 'ugriz'].
+        nosie: str.
+            Whether to add noise to the predicted photometry.
+            If `noise=None`, no noise is added.
+            If `noise='nsa'`, we add noise based on NSA catalog.
+            If `noise='snr'`, we add noise with constant SNR. Therefore, SNR must be provided.
+        noise_model_dir: str.
+            The directory of the noise model. Only works if `noise='nsa'`.
+        SNR: float.
+            The signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry).
+            Only works if `noise='snr'`.
+
+        Returns:
+            mags: torch.Tensor.
+                Predicted photometry, shape = (n_bands, n_samples).
+        """
+        if hasattr(self, 'filterset') and self.filterset != filterset:
+            self.filterset = filterset
+            self._calc_transmission(filterset)
+        elif hasattr(self, 'filterset') and self.filterset == filterset:
+            # Don't interpolate transmission efficiency again.
+            pass
+        elif hasattr(self, 'filterset') is False:
+            self._calc_transmission(filterset)
+
+        # get magnitude from a spectrum
+        # lightspeed = 2.998e18  # AA/s
+        # jansky_cgs = 1e-23
+
+        # Notice: for NMF-based emulator, we train the emulator based on spectra with Lsun/Hz unit.
+        # We convert Lsun/Hz to Lsun/AA, then to erg/s/AA at 10pc. The extra distance term is taken
+        # into account in the `transform` (redshifting).
+        if self._model == 'NMF':
+            _spec = self._predict_spec_with_mass_redshift(
+                params) * self.lightspeed / self.wavelength**2 * self.to_cgs_at_10pc
+        else:
+            raise NotImplementedError('Only NMF-based emulator is supported.')
+        _spec = torch.nan_to_num(_spec, 0.0)
+
+        maggies = torch.trapezoid(
+            ((self.wavelength * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
+             ), self.wavelength) / self.ab_zero_counts
+
+        if noise == 'nsa':
+            # Add noise based on NSA noise model.
+            self._parse_nsa_noise_model(noise_model_dir)
+            mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
+            _sigs_mags = torch.zeros_like(mags)
+            _sig_flux = torch.zeros_like(mags)
+            for i in range(maggies.shape[1]):
+                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
+                    0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+                _sig_flux[:, i] = utils.sigma_mag2flux(
+                    _sigs_mags[:, i], mags[:, i])  # in nanomaggies
+            _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
+            _noise[(maggies + _noise) < 0] = 0.0
+            return -2.5 * torch.log10(maggies + _noise)
+
+        elif noise == 'snr':
+            # Add noise with constant SNR.
+            _noise = torch.randn_like(maggies) * maggies / SNR
+            _noise[(maggies + _noise) < 0] = 0.0
+            maggies += _noise
+
+        if torch.isnan(maggies).any() or torch.isinf(maggies).any():
+            print(maggies)
+        mags = -2.5 * torch.log10(maggies)
+
+        return mags
+
+    def predict_mag(self, params, log_stellar_mass=None, redshift=None, **kwargs):
+        """
+        Predict the corresponding magnitude for given physical parameters.
+
+        Parameters
+        ----------
+        params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
+            shape = (n_samples, n_params).
+        log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
+        redshift: torch.Tensor or np.ndarray. Redshift of each spectrum, shape = (n_samples).
+        kwargs: you can pass filterset and noise model here. See `self._predict_mag_with_mass_redshift`.
+
+        Returns
+        -------
+        mag: torch.Tensor. The predicted magnitudes, shape = (n_wavelength, n_samples).
+        """
+        if not torch.is_tensor(params):
+            params = torch.Tensor(params).to(self.device)
+        params = params.to(self.device)
+        if log_stellar_mass is None:
+            log_stellar_mass = torch.zeros_like(params[:, 0:1])
+        if redshift is None:
+            redshift = torch.zeros_like(params[:, 0:1])
+        return self._predict_mag_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device), **kwargs)
