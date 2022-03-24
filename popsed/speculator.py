@@ -989,11 +989,12 @@ class SuperSpeculator():
     from .models import lightspeed, to_cgs_at_10pc
 
     def __init__(self, speculators_dir=None, str_wbin=[
+        '.w1000_2000',
         '.w2000_3600',
         '.w3600_5500',
         '.w5500_7410',
         '.w7410_60000'
-    ], wavelength=None, device='cuda'):
+    ], wavelength=None, params_name=None, device='cuda'):
         speculators = []
         for file in speculators_dir:
             with open(file, 'rb') as f:
@@ -1008,7 +1009,9 @@ class SuperSpeculator():
         self.str_wbin = str_wbin
         self.device = device
         self.wavelength = torch.Tensor(wavelength).to(self.device)
+        self.params_name = params_name
         self._build_distance_interpolator()
+        self._build_params_prior()
 
     def _build_distance_interpolator(self):
         """
@@ -1024,6 +1027,40 @@ class SuperSpeculator():
             cosmo.luminosity_distance(z_grid).value)  # Mpc
         self.z_grid = z_grid.to(self.device)
         self.dist_grid = dist_grid.to(self.device)
+
+    def _build_params_prior(self):
+        """
+        Hard bound prior for the input physical parameters.
+        E.g., redshift cannot be negative.
+
+        WARNING:
+        / This prior should be consistant with the \
+        \ prior used in training the emulator.     /
+        ----------------------------------------
+                \   ^__^
+                \  (oo)\_______
+                    (__)\       )\/\
+                        ||----w |
+                        ||     ||
+        """
+        if self._model == 'tau':
+            self.prior = {'tage': [0, 14],
+                          'logtau': [-4, 4],
+                          'logzsol': [-3, 2],
+                          'dust2': [0, 5],
+                          'logm': [0, 16],
+                          'redshift': [0, 10]}
+        elif self._model == 'NMF':
+            self.prior = {'kappa1_sfh': [0, 1], 'kappa2_sfh': [0, 1],
+                          # uniform from 0 to 1. Will be tranformed to betas.
+                          'kappa3_sfh': [0, 1],
+                          'fburst': [0, 1.0], 'tburst': [1e-2, 13.27],
+                          'logzsol': [-2.6, 0.3],
+                          'dust1': [0, 3], 'dust2': [0, 3], 'dust_index': [-3, 1],
+                          'logm': [0, 16],
+                          'redshift': [0, 1.5]}
+
+        self.bounds = np.array([self.prior[key] for key in self.params_name])
 
     def _calc_transmission(self, filterset):
         import sys
@@ -1056,6 +1093,29 @@ class SuperSpeculator():
         self.filterset = filterset
         self.transmission_effiency = Tensor(_epsilon).to(self.device)
         self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
+
+    def _parse_nsa_noise_model(self, noise_model_dir):
+        """
+        Parse the noise model from the NSA.
+        The noise model is generated in `popsed/notebook/forward_model/noise_model/``.
+
+        Parameters
+        ----------
+        noise_model_dir: str. The directory of the noise model file.
+        """
+        meds_sigs, stds_sigs = np.load(noise_model_dir, allow_pickle=True)
+        # meds_sigs is the median of noise, stds_sigs is the std of noise. All in magnitude.
+
+        n_filters = len(meds_sigs)
+        mag_grid = torch.arange(10, 30, 1)
+        med_sig_grid = torch.vstack(
+            [Tensor(meds_sigs[i](mag_grid)) for i in range(n_filters)])
+        std_sig_grid = torch.vstack(
+            [Tensor(stds_sigs[i](mag_grid)) for i in range(n_filters)])
+
+        self.mag_grid = mag_grid.to(self.device)
+        self.med_sig_grid = med_sig_grid.T.to(self.device)
+        self.std_sig_grid = std_sig_grid.T.to(self.device)
 
     def predict(self, params):
         """
