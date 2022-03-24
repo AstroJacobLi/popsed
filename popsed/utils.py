@@ -7,6 +7,7 @@ import numpy as np
 import scipy.sparse
 import scipy.special
 from astropy.io import fits
+import torch
 
 
 # --- constants ----
@@ -21,7 +22,7 @@ def parsec():
 def to_cgs():  # at 10pc
     lsun = Lsun()
     pc = parsec()
-    return lsun/(4.0 * np.pi * (10 * pc)**2)
+    return lsun / (4.0 * np.pi * (10 * pc)**2)
 
 
 def c_light():  # AA/s
@@ -32,6 +33,7 @@ def jansky_cgs():
     return 1e-23
 
 # --- flux and magnitudes ---
+
 
 def flux2mag(flux):
     ''' convert flux in nanomaggies to magnitudes
@@ -82,6 +84,8 @@ def interp_nan(log_spec):
         _spec[nans] = np.interp(x(nans), x(~nans), _spec[~nans])
     return log_spec
 
+# --- SFH related ---
+
 
 def tlookback_bin_edges(tage):
     ''' hardcoded log-spaced lookback time bin edges. Bins have 0.1 log10(Gyr)
@@ -113,9 +117,9 @@ def readDESIspec(ffits):
 
     spec = {}
     for i_k, k in enumerate(['wave', 'flux', 'ivar']):
-        spec[k+'_b'] = fitobj[3+i_k].data
-        spec[k+'_r'] = fitobj[8+i_k].data
-        spec[k+'_z'] = fitobj[13+i_k].data
+        spec[k + '_b'] = fitobj[3 + i_k].data
+        spec[k + '_r'] = fitobj[8 + i_k].data
+        spec[k + '_z'] = fitobj[13 + i_k].data
 
     spec['TARGETID'] = fitobj[1].data['TARGETID']
     return spec
@@ -155,7 +159,7 @@ class Resolution(scipy.sparse.dia_matrix):
             if len(offsets) < 3:
                 raise ValueError(
                     "Only {} resolution matrix diagonals?  That's probably way too small".format(len(offsets)))
-            if len(offsets) > 4*default_ndiag:
+            if len(offsets) > 4 * default_ndiag:
                 raise ValueError(
                     "{} resolution matrix diagonals?  That's probably way too big".format(len(offsets)))
 
@@ -181,13 +185,14 @@ class Resolution(scipy.sparse.dia_matrix):
                         "Number of diagonals ({}) should be odd if offsets aren't included".format(ntotdiag))
                 else:
                     # - Auto-derive offsets
-                    self.offsets = np.arange(ntotdiag//2, -(ntotdiag//2)-1, -1)
+                    self.offsets = np.arange(
+                        ntotdiag // 2, -(ntotdiag // 2) - 1, -1)
                     scipy.sparse.dia_matrix.__init__(
                         self, (data, self.offsets), (n2, n2))
             elif n1 == n2:
                 if offsets is None:
                     self.offsets = np.arange(
-                        default_ndiag//2, -(default_ndiag//2)-1, -1)
+                        default_ndiag // 2, -(default_ndiag // 2) - 1, -1)
                 else:
                     self.offsets = np.sort(offsets)[-1::-1]  # - reverse sort
 
@@ -207,7 +212,7 @@ class Resolution(scipy.sparse.dia_matrix):
             nwave = len(data)
             rdata = np.empty((default_ndiag, nwave))
             self.offsets = np.arange(
-                default_ndiag//2, -(default_ndiag//2)-1, -1)
+                default_ndiag // 2, -(default_ndiag // 2) - 1, -1)
             for i in range(nwave):
                 rdata[:, i] = np.abs(_gauss_pix(self.offsets, sigma=data[i]))
 
@@ -241,39 +246,39 @@ def centers2edges(centers):
         array: bin edges, lenth = len(centers) + 1
     """
     centers = np.asarray(centers)
-    edges = np.zeros(len(centers)+1)
+    edges = np.zeros(len(centers) + 1)
     # - Interior edges are just points half way between bin centers
     edges[1:-1] = (centers[0:-1] + centers[1:]) / 2.0
     # - edge edges are extrapolation of interior bin sizes
-    edges[0] = centers[0] - (centers[1]-edges[1])
-    edges[-1] = centers[-1] + (centers[-1]-edges[-2])
+    edges[0] = centers[0] - (centers[1] - edges[1])
+    edges[-1] = centers[-1] + (centers[-1] - edges[-2])
 
     return edges
 
 
 @numba.jit(nopython=True, fastmath=True)
-def pcaMLP(tt, W0, W1, W2, b0, b1, b2, alphas_, betas_,  param_shift, param_scale,
+def pcaMLP(tt, W0, W1, W2, b0, b1, b2, alphas_, betas_, param_shift, param_scale,
            pca_shift_, pca_scale_, pca_transform_matrix_, n_layers):
     ''' simple MLP implemented in float32 to exploit numba speedup.
     '''
     one = np.float32(1.)
     # forward pass through the network
-    layers = (tt - param_shift)/param_scale
+    layers = (tt - param_shift) / param_scale
 
     # linear network operation
     act = np.dot(layers, W0) + b0
 
     # pass through activation function
     layers = ((betas_[0] + (one - betas_[0]) /
-              (one+np.exp(-alphas_[0]*act)))*act)
+              (one + np.exp(-alphas_[0] * act))) * act)
 
-    for i in range(1, n_layers-1):
+    for i in range(1, n_layers - 1):
         # linear network operation
-        act = np.dot(layers, W1[i-1]) + b1[i-1]
+        act = np.dot(layers, W1[i - 1]) + b1[i - 1]
 
         # pass through activation function
         layers = ((betas_[i] + (one - betas_[i]) /
-                  (one+np.exp(-alphas_[i] * act))) * act)
+                  (one + np.exp(-alphas_[i] * act))) * act)
 
     # final (linear) layer -> (normalized) PCA coefficients
     layers = np.dot(layers, W2) + b2
@@ -308,35 +313,39 @@ def _trapz_rebin(x, y, edges, results):
             j += 1
 
         # - What is the y value where the interpolation crossed the edge?
-        yedge = y[j-1] + (edges[i]-x[j-1]) * (y[j]-y[j-1]) / (x[j]-x[j-1])
+        yedge = y[j - 1] + (edges[i] - x[j - 1]) * \
+            (y[j] - y[j - 1]) / (x[j] - x[j - 1])
 
         # - Is this sample inside this bin?
-        if x[j] < edges[i+1]:
+        if x[j] < edges[i + 1]:
             area = 0.5 * (y[j] + yedge) * (x[j] - edges[i])
             results[i] += area
 
             # - Continue with interior bins
-            while x[j+1] < edges[i+1]:
+            while x[j + 1] < edges[i + 1]:
                 j += 1
-                area = 0.5 * (y[j] + y[j-1]) * (x[j] - x[j-1])
+                area = 0.5 * (y[j] + y[j - 1]) * (x[j] - x[j - 1])
                 results[i] += area
 
             # - Next sample will be outside this bin; handle upper edge
-            yedge = y[j] + (edges[i+1]-x[j]) * (y[j+1]-y[j]) / (x[j+1]-x[j])
-            area = 0.5 * (yedge + y[j]) * (edges[i+1] - x[j])
+            yedge = y[j] + (edges[i + 1] - x[j]) * \
+                (y[j + 1] - y[j]) / (x[j + 1] - x[j])
+            area = 0.5 * (yedge + y[j]) * (edges[i + 1] - x[j])
             results[i] += area
 
         # - Otherwise the samples span over this bin
         else:
-            ylo = y[j] + (edges[i]-x[j]) * (y[j] - y[j-1]) / (x[j] - x[j-1])
-            yhi = y[j] + (edges[i+1]-x[j]) * (y[j] - y[j-1]) / (x[j] - x[j-1])
-            area = 0.5 * (ylo+yhi) * (edges[i+1]-edges[i])
+            ylo = y[j] + (edges[i] - x[j]) * \
+                (y[j] - y[j - 1]) / (x[j] - x[j - 1])
+            yhi = y[j] + (edges[i + 1] - x[j]) * \
+                (y[j] - y[j - 1]) / (x[j] - x[j - 1])
+            area = 0.5 * (ylo + yhi) * (edges[i + 1] - edges[i])
             results[i] += area
 
         i += 1
 
     for i in range(nbin):
-        results[i] /= edges[i+1] - edges[i]
+        results[i] /= edges[i + 1] - edges[i]
 
     return
 
@@ -366,7 +375,7 @@ def trapz_rebin(x, y, xnew=None, edges=None):
     if edges[0] < x[0] or x[-1] < edges[-1]:
         raise ValueError('edges must be within input x range')
 
-    result = np.zeros(len(edges)-1, dtype=np.float64)
+    result = np.zeros(len(edges) - 1, dtype=np.float64)
 
     _trapz_rebin(x, y, edges, result)
 
@@ -405,3 +414,85 @@ def flatten_chain(chain):
     s = list(chain.shape[1:])
     s[0] = np.prod(chain.shape[:2])
     return chain.reshape(s)
+
+
+def set_env(project='popsed', name='', data_dir='/scratch/gpfs/jiaxuanl/Data/'):
+    import os
+
+    # Master directory
+    try:
+        data_dir = os.path.join(
+            os.getenv('HOME'), data_dir, project, name)
+    except:
+        raise Exception("Can not recognize this dataset!")
+
+    os.chdir(data_dir)
+    return data_dir
+
+
+def set_matplotlib(style='JL', usetex=True, fontsize=13, figsize=(6, 5), dpi=60):
+    '''
+    Default matplotlib settings, borrowed from Song Huang. I really like his plotting style.
+
+    Parameters:
+        style (str): options are "JL", "SM" (supermongo-like).
+    '''
+
+    import matplotlib.pyplot as plt
+    from matplotlib.colorbar import Colorbar
+    from matplotlib import rcParams
+    import popsed
+
+    # Use JL as a template
+    pkg_path = popsed.__path__[0]
+    if style == 'default':
+        plt.style.use(os.path.join(pkg_path, 'mplstyle/default.mplstyle'))
+    else:
+        plt.style.use(os.path.join(pkg_path, 'mplstyle/JL.mplstyle'))
+
+    rcParams.update({'font.size': fontsize,
+                     'figure.figsize': "{0}, {1}".format(figsize[0], figsize[1]),
+                     'text.usetex': usetex,
+                     'figure.dpi': dpi})
+
+    if style == 'SM':
+        rcParams.update({
+            "figure.figsize": "6, 6",
+            "axes.linewidth": 0.6,
+            "xtick.major.width": 0.5,
+            "xtick.minor.width": 0.3,
+            "ytick.major.width": 0.5,
+            "ytick.minor.width": 0.3,
+            "font.family": "monospace",
+            "font.stretch": "semi-expanded",
+            # The default edge colors for scatter plots.
+            "scatter.edgecolors": "black",
+            "mathtext.bf": "monospace:bold",
+            "mathtext.cal": "monospace:bold",
+            "mathtext.it": "monospace:italic",
+            "mathtext.rm": "monospace",
+            "mathtext.sf": "monospace",
+            "mathtext.tt": "monospace",
+            "mathtext.fallback": "cm",
+            "mathtext.default": 'it'
+        })
+
+        if usetex is True:
+            rcParams.update({
+                "text.latex.preamble": '\n'.join([
+                    '\\usepackage{amsmath}'
+                    '\\usepackage[T1]{fontenc}',
+                    '\\usepackage{courier}',
+                    '\\usepackage[variablett]{lmodern}',
+                    '\\usepackage[LGRgreek]{mathastext}',
+                    '\\renewcommand{\\rmdefault}{\\ttdefault}'
+                ])
+            })
+
+    if style == 'nature':
+        rcParams.update({
+            "font.family": "sans-serif",
+            # The default edge colors for scatter plots.
+            "scatter.edgecolors": "black",
+            "mathtext.fontset": "stixsans"
+        })
