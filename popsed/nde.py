@@ -243,7 +243,7 @@ def build_nsf(
     distribution = distributions_.StandardNormal((x_numel,))
     neural_net = flows.Flow(transform, distribution, embedding_net).to(device)
 
-    return neural_net
+    return neural_net, _mean
 
 
 class NeuralDensityEstimator(object):
@@ -312,7 +312,7 @@ class NeuralDensityEstimator(object):
                 **kwargs
             )
         elif self.method == "nsf":
-            self.net = build_nsf(
+            self.net, self.mean_init = build_nsf(
                 batch_x=batch_theta,
                 z_score_x=self.normalize,
                 initial_pos=self.initial_pos,
@@ -400,6 +400,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             normalize: bool = True,
             initial_pos: dict = None,
             method: str = "nsf",
+            sps_model: str = 'NMF',
+            seed: int = None,
             hidden_features: int = 50,
             num_transforms: int = 5,
             num_bins: int = 10,
@@ -431,16 +433,29 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             embedding_net=embedding_net,
             **kwargs
         )
+        self.sps_model = sps_model
         self.initial_pos = initial_pos
-        self.patience = 5
+        self.patience = 2
         self.min_loss = 0.1
         self.best_loss_epoch = 0
-        self.index = np.random.randint(0, 1000)
+        if seed is not None:
+            self.seed = seed
+        else:
+            self.seed = np.random.randint(0, 1000)
+
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+
         # Used to identify the model
         self.output_dir = output_dir
         if (self.output_dir is not None):
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
+        if self.sps_model == 'NMF':
+            self.penalty_powers = [50] * 3 + [50] * 6 + [50] + [50] + [50]
+            #[100] * 9 + [500] + [100] + [500]
+        else:
+            self.penalty_powers = [100, 100, 100, 100, 50, 500]
 
     def build(self, batch_theta: Tensor,
               batch_X: Tensor,
@@ -494,11 +509,51 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         # val = 10.0
         # Y = torch.nan_to_num(Y, val, posinf=val, neginf=-val)
         # - torch.log10(1 - bad_ratio) / 10
-        powers = torch.Tensor([100, 100, 100, 100, 50, 500]).to(self.device)
+        powers = torch.Tensor(self.penalty_powers).to(self.device)
         penalty = log_prior(sample,
                             torch.Tensor(speculator.bounds).to(self.device), powers)
         penalty = penalty[~torch.isinf(penalty)].mean()
         loss = loss_fn(X, Y) + penalty
+        # print(penalty)
+        # loss = loss_fn(X, Y) - 10 * torch.log10(1 - bad_ratio) # bad_ratio * 5
+        # loss = torch.log10(loss_fn(X, Y)) + torch.log10(loss_fn(X[:, 1:4], Y[:, 1:4])) - torch.log10(1 - bad_ratio)
+        #+ torch.exp(5 * bad_ratio)
+
+        return loss, penalty
+
+    def _get_loss_NMF(self, X, speculator, n_samples,
+                      noise, SNR, noise_model_dir,
+                      loss_fn, only_penalty=False):
+        sample = self.sample(n_samples)
+        Y = self.scaler.transform(
+            speculator._predict_mag_with_mass_redshift(
+                sample, filterset=self.filterset,
+                noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+        )
+        bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
+            :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
+        # bad_mask |= (torch.isnan(Y).any(axis=1) | torch.isinf(Y).any(axis=1))
+        Y = Y[~bad_mask]
+        # Y = self.scaler.transform(
+        #     speculator._predict_mag_with_mass_redshift(
+        #         self.sample(n_samples), filterset=self.filterset,
+        #         noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+        # )
+        # bad_mask = (torch.isnan(Y).any(dim=1) | torch.isinf(Y).any(dim=1))
+        # print('Bad mask num', bad_mask.sum())
+        # bad_ratio = bad_mask.sum() / len(Y)
+        # Y = Y[~bad_mask]
+        # val = 10.0
+        # Y = torch.nan_to_num(Y, val, posinf=val, neginf=-val)
+        # - torch.log10(1 - bad_ratio) / 10
+        powers = torch.Tensor(self.penalty_powers).to(self.device)
+        penalty = log_prior(sample,
+                            torch.Tensor(speculator.bounds).to(self.device), powers)
+        penalty = penalty[~torch.isinf(penalty)].mean()
+        if only_penalty:
+            loss = penalty
+        else:
+            loss = penalty + loss_fn(X, Y)
         # print(penalty)
         # loss = loss_fn(X, Y) - 10 * torch.log10(1 - bad_ratio) # bad_ratio * 5
         # loss = torch.log10(loss_fn(X, Y)) + torch.log10(loss_fn(X[:, 1:4], Y[:, 1:4])) - torch.log10(1 - bad_ratio)
@@ -513,7 +568,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
               n_epochs: int = 100, lr=1e-3,
               speculator=None, noise='nsa', SNR=20, noise_model_dir=None,
               sinkhorn_kwargs={'p': 1, 'blur': 0.01, 'scaling': 0.8},
-              scheduler=None,):
+              scheduler=None, only_penalty=False):
         """
         Train the neural density estimator using Wasserstein loss.
         """
@@ -538,15 +593,15 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.3, shuffle=True)
             n_samples = len(X_train)
-            loss, bad_ratio = self._get_loss(X_train, speculator, n_samples,
-                                             noise, SNR, noise_model_dir, L)
+            loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
+                                                 noise, SNR, noise_model_dir, L, only_penalty)
             t.set_description(
                 f'Loss = {loss.item():.3f} (train), {bad_ratio.item():.3f} (bad ratio)')
             loss.backward()
             self.optimizer.step()
             self.train_loss_history.append(loss.item())
-            vali_loss, _ = self._get_loss(self.X_vali, speculator, len(self.X_vali),
-                                          noise, SNR, noise_model_dir, L)
+            vali_loss, _ = self._get_loss_NMF(self.X_vali, speculator, len(self.X_vali),
+                                              noise, SNR, noise_model_dir, L, only_penalty)
             self.vali_loss_history.append(vali_loss.item())
 
             # t.set_description(
@@ -564,7 +619,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                 if self.output_dir is not None:
                     self.save_model(
                         os.path.join(self.output_dir,
-                                     f'nde_theta_best_loss_{self.method}_{self.index}.pkl')
+                                     f'nde_theta_best_loss_{self.method}_{self.seed}.pkl')
                     )
             if scheduler is not None:
                 scheduler.step()
@@ -647,7 +702,7 @@ def diff_KL_w2009_eq29(X, Y, silent=True, p=1):
 
     # print('   KL =', d_corr + digamma_term + np.log(float(m)/float(n-1)))
     # l_i, k_i, rho_i, nu_i
-    return d_corr + digamma_term + np.log(float(m)/float(n-1))
+    return d_corr + digamma_term + np.log(float(m) / float(n - 1))
 
 
 def _KL_w2009_eq29(X, Y, silent=True):
@@ -679,7 +734,7 @@ def _KL_w2009_eq29(X, Y, silent=True):
     # find l_i and k_i
     _, i_l = NN_X.radius_neighbors(X, eps)
     _, i_k = NN_Y.radius_neighbors(X, eps)
-    l_i = np.array([len(il)-1 for il in i_l])
+    l_i = np.array([len(il) - 1 for il in i_l])
     k_i = np.array([len(ik) for ik in i_k])
     assert l_i.min() > 0
     assert k_i.min() > 0
@@ -690,20 +745,21 @@ def _KL_w2009_eq29(X, Y, silent=True):
     rho_i = np.empty(n, dtype=float)
     nu_i = np.empty(n, dtype=float)
     for i in range(n):
-        rho_ii, _ = NN_X.kneighbors(np.atleast_2d(X[i]), n_neighbors=l_i[i]+1)
+        rho_ii, _ = NN_X.kneighbors(
+            np.atleast_2d(X[i]), n_neighbors=l_i[i] + 1)
         nu_ii, _ = NN_Y.kneighbors(np.atleast_2d(X[i]), n_neighbors=k_i[i])
         rho_i[i] = rho_ii[0][-1]
         nu_i[i] = nu_ii[0][-1]
 
     assert rho_i.min() > 0., 'duplicate elements in your chain'
 
-    d_corr = float(d) / float(n) * np.sum(np.log(nu_i/rho_i))
+    d_corr = float(d) / float(n) * np.sum(np.log(nu_i / rho_i))
     if not silent:
         print('  first term = %f' % d_corr)
     digamma_term = np.sum(digamma(l_i) - digamma(k_i)) / float(n)
     if not silent:
         print('  digamma term = %f' % digamma_term)
-    return d_corr + digamma_term + np.log(float(m)/float(n-1))
+    return d_corr + digamma_term + np.log(float(m) / float(n - 1))
 
 
 def fuzzy_logic_prior(x, loc, width, power):

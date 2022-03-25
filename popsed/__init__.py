@@ -15,3 +15,5 @@ except DistributionNotFound:
 __name__ = 'popsed'
 __author__ = ['Jiaxuan Li']
 __all__ = ["utils", "mock", "speculator", "nde"]
+
+from .utils import set_env, set_matplotlib

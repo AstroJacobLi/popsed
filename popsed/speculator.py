@@ -792,14 +792,17 @@ class Speculator():
         log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
             pca_coeff, device=self.device), device=self.device) + params[:, -2:-1]  # added log_stellar_mass
 
-        # if torch.any(log_spec > 20):
-        #     print('log spec > 20 params:', params[(log_spec > 20).any(dim=1)])
+        thresh = 5
+        # if torch.any(log_spec > thresh):
+        # print(f'# of log spec > {thresh} params:',
+        #       (log_spec > thresh).any(dim=1).sum())
+        log_spec[torch.any(log_spec > thresh, dim=1)] = -30
         # log_spec[torch.any(log_spec > 20, dim=1)] = -12
         # such that interpolation will not do linear extrapolation.
         # spec[:, 0] = 0.0  # torch.nan
         # spec = self.transform(10**log_spec, params[:, -1:], islog=False)
         spec = 10**self.transform(log_spec, params[:, -1], islog=True)
-
+        spec = 10**log_spec
         # if torch.any(torch.isnan(spec)):
         #     print(params[torch.isnan(spec).any(dim=1)])
         # print('Nan in spec:', torch.isnan(spec).sum())
@@ -812,6 +815,38 @@ class Speculator():
         # print('Bad mask:', bad_mask.sum())
         # spec[(params[:, -1:] < 0.0).squeeze(1)] = bad_val
         # spec[(params[:, -2:-1] < 0.0).squeeze(1)] = bad_val
+        return spec
+
+    def _predict_spec_with_mass_restframe(self, params):
+        """
+        Predict the corresponding spectra (in linear scale) for given physical parameters.
+
+        Parameters
+        ----------
+        params: torch.Tensor.
+            SPS physical parameters, including stellar mass. shape = (n_samples, n_params).
+            params[:, :-1] are the SPS physical parameters NOT including stellar mass and redshift.
+                If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
+            params[:, -1:] is the log10 stellar mass.
+
+        Returns
+        -------
+        spec: torch.Tensor.
+            Predicted spectra in linear scales, shape = (n_wavelength, n_samples).
+            **Notice** that if `self._model == "NMF"`, the output spectra is in unit of Lsun/Hz.
+            To convert from L_sun/Hz to L_sun/AA, multiply L_sun/Hz by lightspeed / wave**2.
+            To convert L_sun/Hz to erg/s/cm^2/AA at 10 pc, multiply by `to_cgs_at_10pc`.
+        """
+        pca_coeff = self.predict(params[:, :-1])  # Assuming 1 M_sun.
+        log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
+            pca_coeff, device=self.device), device=self.device) + params[:, -1:]  # added log_stellar_mass
+
+        thresh = 5
+        # if torch.any(log_spec > thresh):
+        # print(f'# of log spec > {thresh} params:',
+        #       (log_spec > thresh).any(dim=1).sum())
+        log_spec[torch.any(log_spec > thresh, dim=1)] = -30
+        spec = 10**log_spec
         return spec
 
     def predict_spec_from_norm_pca(self, y):
@@ -1157,11 +1192,9 @@ class SuperSpeculator():
         if log_stellar_mass is None:
             log_stellar_mass = torch.zeros_like(params[:, 0:1])
 
-        redshift = torch.zeros_like(params[:, 0:1])
-
         return torch.hstack(
-            [_speculator.predict_spec(
-                params, log_stellar_mass=log_stellar_mass, redshift=redshift
+            [_speculator._predict_spec_with_mass_restframe(
+                torch.hstack([params, log_stellar_mass])
             ) for _speculator in self.speculators])
 
     def transform(self, spectra_restframe, z, islog=False):
@@ -1195,7 +1228,6 @@ class SuperSpeculator():
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
             # 1e5 because the absolute mag is 10pc.
             dfactor = ((distances * 1e5)**2 / (1 + z))
-
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
             if islog:
@@ -1230,8 +1262,19 @@ class SuperSpeculator():
             params = torch.Tensor(params).to(self.device)
         params = params.to(self.device)
         spec_rest = self._predict_spec_restframe(
-            params[:, :-2], log_stellar_mass=params[:, -2:-1])  # restframe
-        spec = self.transform(spec_rest, params[:, -1:], islog=False)
+            params[:, :-1], log_stellar_mass=params[:, -1:])  # restframe
+
+        # if torch.any(torch.log10(spec_rest) > thresh):
+        #     # print(f'log spec > {thresh} params:',
+        #     #       params[(torch.log10(spec_rest) > thresh).any(dim=1)])
+        #     print(f'log spec > {thresh} params:', (torch.log10(
+        #         spec_rest) > thresh).any(dim=1).sum())
+        # such that interpolation will not do linear extrapolation.
+        # spec_rest[:, 0] = 0.0  # torch.nan
+        spec = self.transform(spec_rest, params[:, -2:-1], islog=False)
+        thresh = 15
+        spec[torch.any(torch.log10(spec_rest) > thresh, dim=1)] = 1e-30
+        # spec_rest[torch.any(torch.log10(spec_rest) > thresh, dim=1)] = 1e-30
         return spec
 
     def predict_spec(self, params, log_stellar_mass=None, redshift=None):
@@ -1318,6 +1361,8 @@ class SuperSpeculator():
         maggies = torch.trapezoid(
             ((self.wavelength * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
              ), self.wavelength) / self.ab_zero_counts
+
+        maggies[maggies <= 0.] = 1e-15
 
         if noise == 'nsa':
             # Add noise based on NSA noise model.
