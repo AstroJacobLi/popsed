@@ -1029,7 +1029,25 @@ class SuperSpeculator():
         '.w3600_5500',
         '.w5500_7410',
         '.w7410_60000'
-    ], wavelength=None, params_name=None, device='cuda'):
+        ], wavelength=None, params_name=None, device='cuda'):
+        """
+        Initialize the SuperSpeculator.
+
+        Parameters
+        ----------
+        speculators_dir: str, the directory of each speculator.
+        str_wbin: list of str. The wavelength bin of each speculator.
+        wavelength: list of float. The wavelength of each speculator. 
+            The wavelength is stored at './train_sed_NMF/nmf_seds/fsps.wavelength.npy'
+        params_name: list of str. The name of the parameters of each speculator. 
+            The default would be ['kappa1_sfh', 'kappa2_sfh', 'kappa3_sfh', 
+                 'fburst', 'tburst', 'logzsol', 'dust1', 'dust2', 
+                 'dust_index', 'redshift', 'logm']. 
+            Please follow the order such that redshift is the second last one, 
+            and log stellar mass is the last one.
+        device: str. The device to run the model.
+
+        """
         speculators = []
         for file in speculators_dir:
             with open(file, 'rb') as f:
@@ -1066,7 +1084,8 @@ class SuperSpeculator():
     def _build_params_prior(self):
         """
         Hard bound prior for the input physical parameters.
-        E.g., redshift cannot be negative.
+        E.g., redshift cannot be negative. 
+        We replace zero with 1e-10 such that its log is not -inf.
 
         WARNING:
         / This prior should be consistant with the \
@@ -1086,14 +1105,16 @@ class SuperSpeculator():
                           'logm': [0, 16],
                           'redshift': [0, 10]}
         elif self._model == 'NMF':
-            self.prior = {'kappa1_sfh': [0, 1], 'kappa2_sfh': [0, 1],
-                          # uniform from 0 to 1. Will be tranformed to betas.
-                          'kappa3_sfh': [0, 1],
-                          'fburst': [0, 1.0], 'tburst': [1e-2, 13.27],
+            self.prior = {'kappa1_sfh': [1e-10, 1], 
+                          'kappa2_sfh': [1e-10, 1],
+                          'kappa3_sfh': [1e-10, 1],
+                          # uniform from 0 to 1. Will be tranformed to betas. 1e-10 for numerical stability.
+                          'fburst': [1e-10, 1.0], 'tburst': [1e-2, 13.27],
                           'logzsol': [-2.6, 0.3],
-                          'dust1': [0, 3], 'dust2': [0, 3], 'dust_index': [-3, 1],
-                          'logm': [0, 16],
-                          'redshift': [0, 1.5]}
+                          'dust1': [1e-10, 3], 'dust2': [1e-10, 3], 'dust_index': [-3, 1],
+                          'logm': [1e-10, 16],
+                          'redshift': [1e-10, 1.5]
+                          }
 
         self.bounds = np.array([self.prior[key] for key in self.params_name])
 

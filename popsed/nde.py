@@ -1,6 +1,5 @@
 '''
-Neural density estimators, build based on https://github.com/mackelab/sbi/blob/019fde2d61edbf8b4a02e034dc9c056b0d240a5c/sbi/neural_nets/flow.py#L77
-But here everything is not conditioned.
+Neural density estimator for population-level inference. 
 '''
 import torch
 from torch import nn, Tensor, optim
@@ -19,13 +18,17 @@ from tqdm import trange
 import pickle
 import numpy as np
 
-from scipy.linalg import sqrtm
 from scipy.special import digamma
 from sklearn.neighbors import NearestNeighbors
+from sklearn.model_selection import train_test_split
 from popsed.speculator import StandardScaler
 from geomloss import SamplesLoss
 
 
+"""
+I steal the NF code from https://github.com/mackelab/sbi/blob/019fde2d61edbf8b4a02e034dc9c056b0d240a5c/sbi/neural_nets/flow.py#L77
+But here everything is NOT conditioned.
+"""
 def build_maf(
     batch_x: Tensor = None,
     z_score_x: bool = True,
@@ -33,11 +36,9 @@ def build_maf(
     num_transforms: int = 5,
     embedding_net: nn.Module = nn.Identity(),
     device: str = 'cuda',
-    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2],
-                         'std': [1, 1, 1, 0.05],
-                         'perturb': [0.3, 0.3, 0.3, 0.05]},
+    initial_pos: dict = {'bounds': [[1, 2], [0, 1]], 'std': [1, .05]},
     **kwargs,
-) -> nn.Module:
+):
     """Builds MAF to describe p(x).
 
     Args:
@@ -83,8 +84,9 @@ def build_maf(
         transform = transforms.CompositeTransform([transform_zx, transform])
 
     if initial_pos is not None:
-        _mean = np.random.multivariate_normal(
-            initial_pos['mean'], np.diag(initial_pos['perturb']))
+        _mean = np.random.uniform(
+            low=np.array(initial_pos['bounds'])[:, 0], high=np.array(initial_pos['bounds'])[:, 1])
+        print(_mean)
         transform_init = transforms.AffineTransform(shift=torch.Tensor(-_mean) / torch.Tensor(initial_pos['std']),
                                                     scale=1.0 / torch.Tensor(initial_pos['std']))
         transform = transforms.CompositeTransform([transform_init, transform])
@@ -103,9 +105,9 @@ def build_nsf(
     num_bins: int = 10,
     embedding_net: nn.Module = nn.Identity(),
     device: str = 'cuda',
-    initial_pos: dict = {'mean': [5, 1, 10.5, 0.2], 'std': [1, 1, 1, 0.05], 'perturb': [0.3, 0.3, 0.3, 0.05]},
+    initial_pos: dict = {'bounds': [[1, 2], [0, 1]], 'std': [1, .05]},
     **kwargs,
-) -> nn.Module:
+):
     """Builds NSF to describe p(x).
     Args:
         batch_x: Batch of xs, used to infer dimensionality and (optional) z-scoring.
@@ -248,7 +250,7 @@ def build_nsf(
 
 class NeuralDensityEstimator(object):
     """
-    Neural density estimator.
+    Neural density estimator class. Basically a wrapper.
     """
 
     def __init__(
@@ -263,24 +265,37 @@ class NeuralDensityEstimator(object):
             **kwargs):
         """
         Initialize neural density estimator.
-        Args:
-            normalize: Whether to z-score the data.
-            method: Method to use for density estimation, either 'nsf' or 'maf'.
-            hidden_features: Number of hidden features.
-            num_transforms: Number of transforms.
-            num_bins: Number of bins used for the splines.
-            embedding_net: Optional embedding network for y.
-            kwargs: Additional arguments that are passed by the build function but are not
-                relevant for maf and are therefore ignored.
+
+        Parameters
+        ----------
+        normalize: Whether to z-score the data that you want to model.
+        initial_pos: Initial position of the density, 
+            e.g., `{'bounds': [[1, 2], [0, 1]], 'std': [1, .05]}`.
+            It includes the bounds for sampling the means of Gaussians, 
+            and the standard deviations of the Gaussians.
+        method: Method to use for density estimation, either 'nsf' or 'maf'.
+        hidden_features: Number of hidden features.
+        num_transforms: Number of transforms.
+        num_bins: Number of bins used for the splines.
+        embedding_net: Optional embedding network for y.
+        kwargs: Additional arguments that are passed by the build function but are not
+            relevant for maf and are therefore ignored.
         """
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu')
+        assert method in ['nsf', 'maf'], "Method must be either 'nsf' or 'maf'."
         self.method = method
+
         self.hidden_features = hidden_features
         self.num_transforms = num_transforms
         self.num_bins = num_bins  # only works for NSF
         self.normalize = normalize
+        
+        if initial_pos is None:
+            raise ValueError("initial_pos must be specified. Please see the documentation.")
+        assert len(initial_pos['bounds']) == len(initial_pos['std']), "The length of bounds and std must be the same."
         self.initial_pos = initial_pos
+
         self.embedding_net = embedding_net
         self.train_loss_history = []
         self.vali_loss_history = []
@@ -290,10 +305,11 @@ class NeuralDensityEstimator(object):
         """
         Build the neural density estimator based on input data.
 
-        Args:
-            batch_theta (torch.Tensor): the input data whose distribution will be modeled by NDE.
-            optimizer (float): the optimizer to use for training, default is Adam.
-            lr (float): learning rate for the optimizer.
+        Parameters
+        ----------
+        batch_theta (torch.Tensor): the input data whose distribution will be modeled by NDE.
+        optimizer (float): the optimizer to use for training, default is Adam.
+        lr (float): learning rate for the optimizer.
 
         """
         if not torch.is_tensor(batch_theta):
@@ -335,6 +351,14 @@ class NeuralDensityEstimator(object):
     def _train(self, n_epochs: int = 2000, display=False, suffix: str = "nde"):
         """
         Train the neural density estimator based on input data.
+        Here we use the log(P) loss. This function is not used in the project.
+
+        Parameters
+        ----------
+        n_epochs: Number of epochs to train.
+        display: Whether to display the training loss.
+        suffix: Suffix to add to the output file.
+
         """
         min_loss = -19
         patience = 5
@@ -365,10 +389,26 @@ class NeuralDensityEstimator(object):
     def sample(self, n_samples: int = 1000):
         """
         Sample according to the fitted NDE
+
+        Parameters
+        ----------
+        n_samples: Number of samples to draw.
+
+        Returns
+        -------
+        samples: Samples drawn from the NDE.
         """
         return self.net.sample(n_samples)
 
     def plot_loss(self, min_loss=0.017):
+        """
+        Display the loss curves.
+
+        Parameters
+        ----------
+        min_loss: a horizontal line at `min_loss` will be shown.
+
+        """
         # min_loss is the intrinsic minimum loss
         import matplotlib.pyplot as plt
         plt.plot(np.array(self.train_loss_history).flatten(), label='Train loss')
@@ -382,17 +422,21 @@ class NeuralDensityEstimator(object):
         plt.legend()
 
     def save_model(self, filename):
+        """
+        Save NDE model.
+
+        Parameters
+        ----------
+        filename: Name of the file to save the model.
+
+        """
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
-
-    def load_model(self, filename):
-        with open(filename, 'rb') as f:
-            self = pickle.load(f)
 
 
 class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
     """
-    Wasserstein Neural Density Estimator, trained based on given data.
+    Wasserstein Neural Density Estimator. We use this class in the paper.
     """
 
     def __init__(
@@ -410,18 +454,24 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             **kwargs):
         """
         Initialize Wasserstein Neural Density Estimator.
-        Args:
-            normalize: Whether to z-score the data.
-            initial_pos (dict): intial position of the Gaussian distribution. E.g., 
-                {'mean': [5, 1, 10.5, 0.2], 'std': [1, 1, 1, 0.05]}.
-            method: Method to use for density estimation, either 'nsf' or 'maf'.
-            hidden_features: Number of hidden features.
-            num_transforms: Number of transforms.
-            num_bins: Number of bins used for the splines.
-            embedding_net: Optional embedding network for y.
-            kwargs: Additional arguments that are passed by the build function but are not
-                relevant for maf and are therefore ignored.
-            output_dir (str): output directory for the trained model.
+
+        Parameters
+        ----------
+        normalize: bool, whether to normalize the input data. Default is True.
+        initial_pos: dict, the initial position of the Gaussians in NF. 
+            E.g., `{'bounds': [[1, 2], [0, 1]], 'std': [1, .05]}`.
+            It includes the bounds for sampling the means of Gaussians, 
+            and the standard deviations of the Gaussians.
+        method: str, the method to use for NDE. Default is 'nsf'. 
+            Only support 'nsf' and 'maf' now.
+        sps_model: str, the model to use for SPS. Default is 'NMF'.
+        seed: int, random seed. If None, will randomly generate one.
+        hidden_features: int, number of hidden features.
+        num_transforms: int, number of transforms.
+        num_bins: int, number of bins. Only works for `method='nsf'`.
+        embedding_net: nn.Module, the embedding net. Default is nn.Identity().
+        output_dir: str, the output directory. Default is './nde_theta/'.
+
         """
         super(WassersteinNeuralDensityEstimator, self).__init__(
             normalize=normalize,
@@ -433,25 +483,29 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             embedding_net=embedding_net,
             **kwargs
         )
+        assert sps_model in ['NMF', 'tau'], 'Only support `NMF` and `tau` now.'
         self.sps_model = sps_model
         self.initial_pos = initial_pos
         self.patience = 2
         self.min_loss = 0.1
         self.best_loss_epoch = 0
+
         if seed is not None:
             self.seed = seed
         else:
             self.seed = np.random.randint(0, 1000)
-
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
 
-        # Used to identify the model
         self.output_dir = output_dir
         if (self.output_dir is not None):
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
+        
+        # Set penalty term
         if self.sps_model == 'NMF':
+            # self.penalty_powers = [10] * 11
+            # self.penalty_powers = [30] * 3 + [30] * 2 + [30] + [20] * 3 + [30] * 2 # 30 for dust1 and dust2
             self.penalty_powers = [50] * 3 + [50] * 6 + [50] + [50] + [50]
             #[100] * 9 + [500] + [100] + [500]
         else:
@@ -459,31 +513,31 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
     def build(self, batch_theta: Tensor,
               batch_X: Tensor,
-              # batch_size: int = 1000,
               filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
               optimizer: str = "adam",
               lr=1e-3, **kwargs):
         """
         Build the neural density estimator based on input data.
 
-        Args:
-            batch_theta (torch.Tensor): the stellar population parameters.
-                Basically, we only need the shapes and (mean, std) of `batch_theta`.
-            batch_X (torch.Tensor): the observed SEDs, to compare with the predicted SEDs.
-            optimizer (float): the optimizer to use for training, default is Adam.
-            lr (float): learning rate for the optimizer.
+        Parameters
+        ----------
+        batch_theta: Tensor, the stellar population parameters input parameters.
+            This is only needed to construct the NDE (i.e., need dimensions for network).
+        batch_X: Tensor, the input photometry data.
+        filterset: list, the filterset to use. Default is ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
+        optimizer: str, the optimizer to use. Default is 'adam'.
+        lr: float, the learning rate. Default is 1e-3.
 
         """
         # from torch.utils.data import DataLoader
         super().build(batch_theta, optimizer, lr, **kwargs)
 
+        # We z-score the input photometry data
         scaler = StandardScaler(device=self.device)
         scaler.fit(batch_X)
         self.scaler = scaler
         self.X = scaler.transform(batch_X).detach()  # z-scored observed SEDs
         self.filterset = filterset
-        # self.batch_size = batch_size
-        # self.train_dataloader = DataLoader(self.X, batch_size=self.batch_size, shuffle=True)
 
     def _get_loss(self, X, speculator, n_samples,
                   noise, SNR, noise_model_dir,
@@ -523,8 +577,38 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
     def _get_loss_NMF(self, X, speculator, n_samples,
                       noise, SNR, noise_model_dir,
-                      loss_fn, only_penalty=False):
-        sample = self.sample(n_samples)
+                      loss_fn, only_penalty=False, regularize=False):
+        """
+        The most important funcgtion in this class. This defines the loss.
+        This function only works for NMF-based SPS.
+
+        Parameters
+        ----------
+        X: Tensor, the observed photometry data (after being z-scored). 
+            Typically, X = self.X.
+        speculator: SuperSpeculator, which is the emulator for the SEDs.
+        n_samples: int, the number of samples to use. Recommended to be ~5000.
+        noise: float, the noise model. Either 'snr' or 'nsa' or None. 
+            If 'snr', you also need to provide the SNR argument.
+            If 'nsa', you also need to provide the noise_model_dir argument.
+        SNR: float, the signal-to-noise ratio to use if noise is 'snr'.
+        noise_model_dir: str, the directory of the NSA noise model.
+        loss_fn: the loss function to use. Here we use Wasserstein loss.
+        only_penalty: bool, whether to only use the penalty term as loss.
+        regularize: bool. Whether the SED params are transformed using log10 and sigmoid.
+
+        Returns
+        -------
+        loss: Tensor, the loss.
+        penalty: Tensor, the penalty term.
+        """
+        assert noise in [None, 'snr', 'nsa'], 'Only support `snr`, `nsa`, or `None` now.'
+
+        if regularize:
+            sample = inverse_transform_nmf_params(self.sample(n_samples))
+        else:
+            sample = self.sample(n_samples)
+
         Y = self.scaler.transform(
             speculator._predict_mag_with_mass_redshift(
                 sample, filterset=self.filterset,
@@ -532,53 +616,73 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         )
         bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
             :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
-        # bad_mask |= (torch.isnan(Y).any(axis=1) | torch.isinf(Y).any(axis=1))
         Y = Y[~bad_mask]
-        # Y = self.scaler.transform(
-        #     speculator._predict_mag_with_mass_redshift(
-        #         self.sample(n_samples), filterset=self.filterset,
-        #         noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
-        # )
-        # bad_mask = (torch.isnan(Y).any(dim=1) | torch.isinf(Y).any(dim=1))
         # print('Bad mask num', bad_mask.sum())
-        # bad_ratio = bad_mask.sum() / len(Y)
-        # Y = Y[~bad_mask]
-        # val = 10.0
-        # Y = torch.nan_to_num(Y, val, posinf=val, neginf=-val)
-        # - torch.log10(1 - bad_ratio) / 10
+        # bad_mask |= (torch.isnan(Y).any(axis=1) | torch.isinf(Y).any(axis=1))
+
+        ## penalty term
         powers = torch.Tensor(self.penalty_powers).to(self.device)
         penalty = log_prior(sample,
-                            torch.Tensor(speculator.bounds).to(self.device), powers)
+                            torch.Tensor(self.bounds).to(self.device), 
+                            powers)
+        # print('Number of inf:', torch.isinf(penalty).sum())
         penalty = penalty[~torch.isinf(penalty)].mean()
+
         if only_penalty:
             loss = penalty
         else:
             loss = penalty + loss_fn(X, Y)
-        # print(penalty)
-        # loss = loss_fn(X, Y) - 10 * torch.log10(1 - bad_ratio) # bad_ratio * 5
-        # loss = torch.log10(loss_fn(X, Y)) + torch.log10(loss_fn(X[:, 1:4], Y[:, 1:4])) - torch.log10(1 - bad_ratio)
-        #+ torch.exp(5 * bad_ratio)
 
         return loss, penalty
 
-    def load_validation_data(self, X_vali, Y_vali):
-        self.X_vali = self.scaler.transform(X_vali)
+    def load_validation_data(self, X_vali):
+        """
+        Load validation data.
+
+        Parameters
+        ----------
+        X_vali: Tensor, the photometry for validation.
+        """
+        self.X_vali = self.scaler.transform(X_vali) # z-scored observed SEDs
 
     def train(self,
-              n_epochs: int = 100, lr=1e-3,
-              speculator=None, noise='nsa', SNR=20, noise_model_dir=None,
+              n_epochs: int = 100,
+              lr=1e-3,
+              speculator=None,
+              noise='nsa',
+              SNR=20,
+              noise_model_dir=None,
               sinkhorn_kwargs={'p': 1, 'blur': 0.01, 'scaling': 0.8},
-              scheduler=None, only_penalty=False):
+              scheduler=None,
+              only_penalty=False,
+              regularize=False,
+              detect_anomaly=False):
         """
         Train the neural density estimator using Wasserstein loss.
-        """
-        torch.autograd.set_detect_anomaly(False)
-        from sklearn.model_selection import train_test_split
 
+        Parameters
+        ----------
+        n_epochs: int, the number of epochs to train.
+        lr: float, the learning rate.
+        speculator: SuperSpeculator, which is the emulator for the SEDs.
+        noise: str, the noise model. Either 'snr' or 'nsa' or None.
+            If 'snr', you also need to provide the SNR argument.
+            If 'nsa', you also need to provide the noise_model_dir argument.
+        SNR: float, the signal-to-noise ratio to use if noise is 'snr'.
+        noise_model_dir: str, the directory of the NSA noise model.
+        sinkhorn_kwargs: dict, the kwargs for the sinkhorn loss. 
+            See https://www.kernel-operations.io/geomloss/api/pytorch-api.html
+        scheduler: torch.optim.lr_scheduler, the learning rate scheduler.
+        only_penalty: bool, whether to only use the penalty term as loss.
+        regularize: bool. Whether the SED params are transformed using log10 and sigmoid.
+        detect_anomaly: bool, whether to detect the anomaly.
+        """
+        torch.autograd.set_detect_anomaly(detect_anomaly)
+        
         # Define a Sinkhorn (~Wasserstein) loss between sampled measures
         L = SamplesLoss(loss="sinkhorn", **sinkhorn_kwargs)
 
-        # Change learning rate
+        # learning rate
         if scheduler is not None:
             self.optimizer.param_groups[0]['lr'] = lr
 
@@ -588,26 +692,25 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         for epoch in t:
             self.optimizer.zero_grad()
-            # try:
-            # torch.save(self.net.state_dict(), 'temp.net')
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.3, shuffle=True)
             n_samples = len(X_train)
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
-                                                 noise, SNR, noise_model_dir, L, only_penalty)
-            t.set_description(
-                f'Loss = {loss.item():.3f} (train), {bad_ratio.item():.3f} (bad ratio)')
+                                                 noise, SNR, noise_model_dir, L, 
+                                                 only_penalty=only_penalty, regularize=regularize)
+            # t.set_description(
+            #     f'Loss = {loss.item():.3f} (train), {bad_ratio.item():.3f} (bad ratio)')
             loss.backward()
             self.optimizer.step()
             self.train_loss_history.append(loss.item())
+
+            # get validation loss
             vali_loss, _ = self._get_loss_NMF(self.X_vali, speculator, len(self.X_vali),
                                               noise, SNR, noise_model_dir, L, only_penalty)
             self.vali_loss_history.append(vali_loss.item())
 
-            # t.set_description(
-            #     f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali)')
-            # t.set_description(
-            #     f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali), {bad_ratio.item():.3f} (bad ratio)')
+            t.set_description(
+                f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali), {bad_ratio.item():.3f} (bad ratio)')
 
             # Save the model if the loss is the best so far
             if loss.item() < self.min_loss:
@@ -624,22 +727,30 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             if scheduler is not None:
                 scheduler.step()
 
-            # except Exception as e:
-            #     print(e)
-            #     print("Restoring previous state")
-            #     # self.net.load_state_dict(torch.load('temp.net'))
-            #     continue
-
     def goodness_of_fit(self, Y_truth, p=2):
+        """
+        Compare the recovered P(theta|D) with the ground truth. 
+        Only works for mock observations (since you know the ground truth).
+
+        Parameters
+        ----------
+        Y_truth: Tensor, the ground truth SED parameters.
+        p: int, the p-norm to use for sinkhorn loss.
+
+        Returns
+        -------
+        float, the log10 of sinkhorn loss, which represents the goodness of fit.
+        """
         samples = self.sample(len(Y_truth))
         # very close to Wasserstein loss
         L = SamplesLoss(loss="sinkhorn", p=p, blur=0.001, scaling=0.95)
         self._goodness_of_fit = np.log10(
             L(Y_truth, samples).item())  # The distance in theta space
         print('Log10 Wasserstein distance in theta space: ', self._goodness_of_fit)
+        return self._goodness_of_fit
 
 
-def diff_KL_w2009_eq29(X, Y, silent=True, p=1):
+def _diff_KL_w2009_eq29(X, Y, silent=True, p=1):
     """
     This function is not accurate! Just a rough estimation when X and Y are very different! 
     PyTorch/Faiss implementation of the KL divergence from Wang 2009 eq. 29.
@@ -763,14 +874,55 @@ def _KL_w2009_eq29(X, Y, silent=True):
 
 
 def fuzzy_logic_prior(x, loc, width, power):
+    """
+    Fuzzy logic function.
+    """
     return -100 * torch.log10(1 / (1 + torch.abs((x - loc) / width)**(power)))
 
 
 def log_prior(theta, bounds, powers):
+    """
+    Penalize parameters outside of bounds.
+    """
     width = (bounds[:, 1] - bounds[:, 0]) / 2
     loc = (bounds[:, 1] + bounds[:, 0]) / 2
     index = torch.ones_like(loc) * 3
-    index[-1] = 2
     return torch.vstack([fuzzy_logic_prior(theta[:, i], loc[i], 10 ** (index[i]
                                                                        / powers[i]) * width[i], powers[i]) for i in
                          range(len(bounds))]).mean(dim=0)
+
+def inverse_sigmoid(x):
+    """
+    Inverse sigmoid function.
+    """
+    return torch.log(x / (1 - x))
+
+def transform_nmf_params(params):
+    """
+    Transform (i.e., regularize) SED parameters. 
+    This might help with numerical stability.
+
+    We transform those params at [0, 1] using a sigmoid function.
+    We transform those parasm at [0, inf] using a log function.
+    """
+    _params = params.clone()
+    _params[:, :3] = inverse_sigmoid(_params[:, :3].clone())
+    _params[:, 3:5] = torch.log10(_params[:, 3:5].clone())
+    _params[:, 6:8] = torch.log10(_params[:, 6:8].clone())
+    _params[:, -2:-1] = torch.log10(_params[:, -2:-1].clone())
+    return _params
+
+def inverse_transform_nmf_params(params):
+    """
+    Inverse Transform (i.e., regularize) SED parameters. 
+    This might help with numerical stability.
+
+    We transform those params at [0, 1] using a sigmoid function.
+    We transform those parasm at [0, inf] using a log function.
+    """
+    _params = params.clone()
+    _params[:, :3] = torch.sigmoid(_params[:, :3].clone())
+    _params[:, 3:5] = 10**(_params[:, 3:5].clone())
+    _params[:, 6:8] = 10**(_params[:, 6:8].clone())
+    _params[:, -2:-1] = 10**(_params[:, -2:-1].clone())
+    return _params
