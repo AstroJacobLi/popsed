@@ -50,4 +50,6 @@ if __name__ == '__main__':
     fire.Fire(deploy_training_job)
 
 
-# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise/' --seed_low=10 --seed_high=11
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_new/' --seed_low=0 --seed_high=10
+
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_new/' --seed_low=11 --seed_high=20

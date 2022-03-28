@@ -93,15 +93,17 @@ X_data = X_data[flag].detach()
 Y_truth = Y_truth[flag]
 
 
-def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise/'):
+def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_new/'):
     # Start train NDEs
     from popsed.nde import WassersteinNeuralDensityEstimator
 
     _bounds = speculator.bounds
-    for i in range(4):
+    for i in range(3):
         _bounds[i] = [0.1, 0.9]
-    _bounds[-2] = [0, 0.3]  # redshift
-    _bounds[-1] = [8, 12]  # log_m
+    _bounds[6:8] = [1e-2, 3]
+    _bounds[3] = [0.001, 0.999] # fburst
+    _bounds[-2] = [1e-3, 0.3] # redshift
+    _bounds[-1] = [8, 12] # log_m
 
     for seed in range(seed_low, seed_high):
         X_train, X_vali, Y_train, Y_vali = train_test_split(
@@ -114,8 +116,11 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
                                                       seed=seed,
                                                       output_dir=output_dir,
                                                       initial_pos={'bounds': _bounds,
-                                                                   'std': [0.3, 0.3, 0.3, 0.3, 3,
-                                                                           0.5, 0.6, 0.6, 0.6, 0.07, 0.4]
+                                                                   'std':  [0.3, 0.3, 0.3, # sfh
+                                                                            0.3, 5, # burst 
+                                                                            0.5, # logzsol
+                                                                            0.6, 0.6, 0.6, # dust
+                                                                            0.1, 0.4], # redshift
                                                                    },
                                                       normalize=False)
         NDE_theta.build(
@@ -125,6 +130,7 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
             optimizer='adam')
         NDE_theta.load_validation_data(X_vali, Y_vali)
         NDE_theta.bounds = speculator.bounds
+        NDE_theta.params_name = speculator.params_name
 
         max_epochs = 6
         scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
@@ -144,7 +150,7 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
                                     'p': 1, 'blur': 0.1, 'scaling': 0.8},
                                 scheduler=scheduler
                                 )
-            print(f'    Succeeded in training for {max_epochs} epochs!')
+            print(f'    Succeeded in training for {max_epochs} epochs! \n\n')
         except Exception as e:
             print(e)
 
