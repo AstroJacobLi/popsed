@@ -128,7 +128,7 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
             X_train,
             filterset=filters,
             optimizer='adam')
-        NDE_theta.load_validation_data(X_vali, Y_vali)
+        NDE_theta.load_validation_data(X_vali)
         NDE_theta.bounds = speculator.bounds
         NDE_theta.params_name = speculator.params_name
 
