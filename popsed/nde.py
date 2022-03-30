@@ -4,6 +4,7 @@ Neural density estimator for population-level inference.
 import torch
 from torch import nn, Tensor, optim
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
 from nflows import flows, transforms
 from nflows.nn import nets
@@ -29,6 +30,8 @@ from geomloss import SamplesLoss
 I steal the NF code from https://github.com/mackelab/sbi/blob/019fde2d61edbf8b4a02e034dc9c056b0d240a5c/sbi/neural_nets/flow.py#L77
 But here everything is NOT conditioned.
 """
+
+
 def build_maf(
     batch_x: Tensor = None,
     z_score_x: bool = True,
@@ -283,17 +286,20 @@ class NeuralDensityEstimator(object):
         """
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu')
-        assert method in ['nsf', 'maf'], "Method must be either 'nsf' or 'maf'."
+        assert method in [
+            'nsf', 'maf'], "Method must be either 'nsf' or 'maf'."
         self.method = method
 
         self.hidden_features = hidden_features
         self.num_transforms = num_transforms
         self.num_bins = num_bins  # only works for NSF
         self.normalize = normalize
-        
+
         if initial_pos is None:
-            raise ValueError("initial_pos must be specified. Please see the documentation.")
-        assert len(initial_pos['bounds']) == len(initial_pos['std']), "The length of bounds and std must be the same."
+            raise ValueError(
+                "initial_pos must be specified. Please see the documentation.")
+        assert len(initial_pos['bounds']) == len(
+            initial_pos['std']), "The length of bounds and std must be the same."
         self.initial_pos = initial_pos
 
         self.embedding_net = embedding_net
@@ -501,12 +507,12 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         if (self.output_dir is not None):
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
-        
+
         # Set penalty term
         if self.sps_model == 'NMF':
             # self.penalty_powers = [10] * 11
             # self.penalty_powers = [30] * 3 + [30] * 2 + [30] + [20] * 3 + [30] * 2 # 30 for dust1 and dust2
-            self.penalty_powers = [50] * 3 + [50] * 6 + [50] + [50] + [50]
+            self.penalty_powers = [50] * 3 + [50] * 6 + [50] + [100] + [50]
             #[100] * 9 + [500] + [100] + [500]
         else:
             self.penalty_powers = [100, 100, 100, 100, 50, 500]
@@ -529,15 +535,32 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         lr: float, the learning rate. Default is 1e-3.
 
         """
-        # from torch.utils.data import DataLoader
+        from torch.utils.data import DataLoader
         super().build(batch_theta, optimizer, lr, **kwargs)
 
         # We z-score the input photometry data
-        scaler = StandardScaler(device=self.device)
+        # scaler = StandardScaler(device=self.device)
+        scaler = StandardScaler(device='cpu')
+        # because batch_X is on CPU, we have to first train on CPU
         scaler.fit(batch_X)
         self.scaler = scaler
+
+        # dataloader = DataLoader(batch_X, batch_size=2000, shuffle=True)
+        # self.X = [yield scaler.transform(x, device='cpu').detach() for x in dataloader]
         self.X = scaler.transform(batch_X).detach()  # z-scored observed SEDs
         self.filterset = filterset
+        # scaler.device = self.device
+
+    def load_validation_data(self, X_vali):
+        """
+        Load validation data.
+
+        Parameters
+        ----------
+        X_vali: Tensor, the photometry for validation.
+        """
+        self.X_vali = self.scaler.transform(
+            X_vali, device=X_vali.device)  # z-scored observed SEDs
 
     def _get_loss(self, X, speculator, n_samples,
                   noise, SNR, noise_model_dir,
@@ -602,7 +625,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         loss: Tensor, the loss.
         penalty: Tensor, the penalty term.
         """
-        assert noise in [None, 'snr', 'nsa'], 'Only support `snr`, `nsa`, or `None` now.'
+        assert noise in [None, 'snr',
+                         'nsa'], 'Only support `snr`, `nsa`, or `None` now.'
 
         if regularize:
             sample = inverse_transform_nmf_params(self.sample(n_samples))
@@ -612,7 +636,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         Y = self.scaler.transform(
             speculator._predict_mag_with_mass_redshift(
                 sample, filterset=self.filterset,
-                noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+                noise=noise, SNR=SNR, noise_model_dir=noise_model_dir),
+            device=self.device
         )
         bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
             :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
@@ -620,30 +645,25 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         # print('Bad mask num', bad_mask.sum())
         # bad_mask |= (torch.isnan(Y).any(axis=1) | torch.isinf(Y).any(axis=1))
 
-        ## penalty term
+        # penalty term
         powers = torch.Tensor(self.penalty_powers).to(self.device)
         penalty = log_prior(sample,
-                            torch.Tensor(self.bounds).to(self.device), 
+                            torch.Tensor(self.bounds).to(self.device),
                             powers)
         # print('Number of inf:', torch.isinf(penalty).sum())
         penalty = penalty[~torch.isinf(penalty)].mean()
 
+        dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
+        data_loss = 0.
+        for x in dataloader:
+            data_loss += loss_fn(Y, x.to(self.device))
+
         if only_penalty:
             loss = penalty
         else:
-            loss = penalty + loss_fn(X, Y)
+            loss = penalty + data_loss / len(dataloader)  # loss_fn(X, Y)
 
         return loss, penalty
-
-    def load_validation_data(self, X_vali):
-        """
-        Load validation data.
-
-        Parameters
-        ----------
-        X_vali: Tensor, the photometry for validation.
-        """
-        self.X_vali = self.scaler.transform(X_vali) # z-scored observed SEDs
 
     def train(self,
               n_epochs: int = 100,
@@ -678,7 +698,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         detect_anomaly: bool, whether to detect the anomaly.
         """
         torch.autograd.set_detect_anomaly(detect_anomaly)
-        
+
         # Define a Sinkhorn (~Wasserstein) loss between sampled measures
         L = SamplesLoss(loss="sinkhorn", **sinkhorn_kwargs)
 
@@ -694,9 +714,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             self.optimizer.zero_grad()
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.3, shuffle=True)
-            n_samples = len(X_train)
+            # n_samples = len(X_train)
+            n_samples = 1000
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
-                                                 noise, SNR, noise_model_dir, L, 
+                                                 noise, SNR, noise_model_dir, L,
                                                  only_penalty=only_penalty, regularize=regularize)
             # t.set_description(
             #     f'Loss = {loss.item():.3f} (train), {bad_ratio.item():.3f} (bad ratio)')
@@ -711,6 +732,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
             t.set_description(
                 f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali), {bad_ratio.item():.3f} (bad ratio)')
+
+            if torch.isnan(loss):
+                print('Stop training because the loss is NaN.')
+                break
 
             # Save the model if the loss is the best so far
             if loss.item() < self.min_loss:
@@ -891,11 +916,13 @@ def log_prior(theta, bounds, powers):
                                                                        / powers[i]) * width[i], powers[i]) for i in
                          range(len(bounds))]).mean(dim=0)
 
+
 def inverse_sigmoid(x):
     """
     Inverse sigmoid function.
     """
     return torch.log(x / (1 - x))
+
 
 def transform_nmf_params(params):
     """
@@ -911,6 +938,7 @@ def transform_nmf_params(params):
     _params[:, 6:8] = torch.log10(_params[:, 6:8].clone())
     _params[:, -2:-1] = torch.log10(_params[:, -2:-1].clone())
     return _params
+
 
 def inverse_transform_nmf_params(params):
     """

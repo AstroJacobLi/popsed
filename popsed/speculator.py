@@ -93,7 +93,7 @@ class StandardScaler:
             device = self.device
 
         if torch.is_tensor(values):
-            return (values - self.mean) / (self.std + self.epsilon).to(device)
+            return ((values - self.mean.to(device)) / (self.std.to(device) + self.epsilon)).to(device)
         else:
             return (values - self.mean) / (self.std + self.epsilon)
 
@@ -737,7 +737,7 @@ class Speculator():
             params = torch.Tensor(params).to(self.device)
         params = params.to(self.device)
         self.network.eval()
-        pca_coeff = self.network(params)
+        pca_coeff = self.network.to(self.device)(params)
         pca_coeff = self.pca_scaler.inverse_transform(
             pca_coeff, device=self.device)
 
@@ -1029,7 +1029,7 @@ class SuperSpeculator():
         '.w3600_5500',
         '.w5500_7410',
         '.w7410_60000'
-        ], wavelength=None, params_name=None, device='cuda'):
+    ], wavelength=None, params_name=None, device='cuda'):
         """
         Initialize the SuperSpeculator.
 
@@ -1054,6 +1054,7 @@ class SuperSpeculator():
                 speculators.append(pickle.load(f))
 
         for _speculator in speculators:
+            _speculator.device = device
             _speculator.network.eval()
             assert _speculator._model == 'NMF', 'Only NMF model is supported.'
 
@@ -1105,7 +1106,7 @@ class SuperSpeculator():
                           'logm': [0, 16],
                           'redshift': [0, 10]}
         elif self._model == 'NMF':
-            self.prior = {'kappa1_sfh': [1e-10, 1], 
+            self.prior = {'kappa1_sfh': [1e-10, 1],
                           'kappa2_sfh': [1e-10, 1],
                           'kappa3_sfh': [1e-10, 1],
                           # uniform from 0 to 1. Will be tranformed to betas. 1e-10 for numerical stability.
@@ -1411,6 +1412,32 @@ class SuperSpeculator():
         mags = -2.5 * torch.log10(maggies)
 
         return mags
+
+    def _predict_mag_with_mass_redshift_batch(self, params,
+                                              filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
+                                              noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10):
+        """
+        The wrapper for `_predict_mag_with_mass_redshift` for large sample size.
+        """
+        size = len(params)
+        if not torch.is_tensor(params):
+            params = torch.tensor(params)  # still on CPU
+
+        dataloader = DataLoader(params, batch_size=200, shuffle=False)
+        mags = torch.zeros((size, len(filterset)))
+        for i, data in enumerate(dataloader):
+            data = data.to(self.device)
+            mags[i * 200:(i + 1) * 200] = self._predict_mag_with_mass_redshift(
+                data, filterset, noise, noise_model_dir, SNR).clone().cpu()
+        torch.cuda.empty_cache()
+        return mags
+        # mags = self._predict_mag_with_mass_redshift(
+        #     data, filterset=filterset, noise=noise,
+        #     noise_model_dir=noise_model_dir, SNR=SNR)
+        # if size == 1:
+        #     return mags
+        # else:
+        #     yield mags
 
     def predict_mag(self, params, log_stellar_mass=None, redshift=None, **kwargs):
         """
