@@ -73,17 +73,16 @@ def gen_truth(N_samples=5000):
 
 
 # Generate mock obs
-_thetas, _thetas_unt = gen_truth(N_samples=7000)
+_thetas, _thetas_unt = gen_truth(N_samples=50000)
 filters = ['sdss_{0}0'.format(b) for b in 'ugriz']
 Y_truth = np.hstack([_thetas_unt[:, 1:],  # params taken by emulator, including redshift (for t_age)
                      _thetas_unt[:, 0:1],  # stellar mass
                      ])
 Y_truth = torch.Tensor(Y_truth).to('cuda')
 
-X_data = speculator._predict_mag_with_mass_redshift(Y_truth, filterset=filters,
-                                                    noise=noise,
-                                                    noise_model_dir=noise_model_dir)
-
+X_data = speculator._predict_mag_with_mass_redshift_batch(Y_truth, filterset=filters,
+                                                          noise=noise,
+                                                          noise_model_dir=noise_model_dir)
 flag = ~(torch.isnan(X_data).any(dim=1) | torch.isinf(X_data).any(dim=1))
 flags = [((Y_truth[:, i] < speculator.bounds[i, 1]) & (Y_truth[:, i] > speculator.bounds[i, 0])).cpu().numpy()
          for i in range(len(speculator.bounds))]
@@ -101,9 +100,9 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
     for i in range(3):
         _bounds[i] = [0.1, 0.9]
     _bounds[6:8] = [1e-2, 3]
-    _bounds[3] = [0.001, 0.999] # fburst
-    _bounds[-2] = [1e-3, 0.3] # redshift
-    _bounds[-1] = [8, 12] # log_m
+    _bounds[3] = [0.001, 0.999]  # fburst
+    _bounds[-2] = [1e-3, 0.3]  # redshift
+    _bounds[-1] = [8, 12]  # log_m
 
     for seed in range(seed_low, seed_high):
         X_train, X_vali, Y_train, Y_vali = train_test_split(
@@ -112,15 +111,15 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
                                                       name='NMF',
                                                       num_transforms=15,  # 10
                                                       num_bins=15,  # how smashed it is. 10
-                                                      hidden_features=50,  # 120,
+                                                      hidden_features=60,  # 120,
                                                       seed=seed,
                                                       output_dir=output_dir,
                                                       initial_pos={'bounds': _bounds,
-                                                                   'std':  [0.3, 0.3, 0.3, # sfh
-                                                                            0.3, 5, # burst 
-                                                                            0.5, # logzsol
-                                                                            0.6, 0.6, 0.6, # dust
-                                                                            0.1, 0.4], # redshift
+                                                                   'std': [0.3, 0.3, 0.3,  # sfh
+                                                                           0.3, 5,  # burst
+                                                                           0.5,  # logzsol
+                                                                           0.6, 0.6, 0.6,  # dust
+                                                                           0.2, 0.6],  # redshift and log_m
                                                                    },
                                                       normalize=False)
         NDE_theta.build(
