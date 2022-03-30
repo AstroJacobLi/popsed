@@ -110,8 +110,8 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
         NDE_theta = WassersteinNeuralDensityEstimator(method='nsf',
                                                       name='NMF',
                                                       num_transforms=15,  # 10
-                                                      num_bins=15,  # how smashed it is. 10
-                                                      hidden_features=60,  # 120,
+                                                      num_bins=10,  # how smashed it is. 10
+                                                      hidden_features=50,  # 120,
                                                       seed=seed,
                                                       output_dir=output_dir,
                                                       initial_pos={'bounds': _bounds,
