@@ -54,6 +54,11 @@ if __name__ == '__main__':
 # python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_new/' --seed_low=11 --seed_high=20
 
 ####### Large is 50000 samples ######
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=0 --seed_high=5
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=5 --seed_high=10
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=10 --seed_high=15
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=15 --seed_high=20
+
 # python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=20 --seed_high=25
 # python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=25 --seed_high=30
 # python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=30 --seed_high=35

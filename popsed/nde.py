@@ -457,6 +457,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             num_bins: int = 10,
             embedding_net: nn.Module = nn.Identity(),
             output_dir='./nde_theta/',
+            regularize=False,
             **kwargs):
         """
         Initialize Wasserstein Neural Density Estimator.
@@ -517,7 +518,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         else:
             self.penalty_powers = [100, 100, 100, 100, 50, 500]
 
-    def build(self, batch_theta: Tensor,
+        self.regularize = regularize
+
+    def build(self, 
+              batch_theta: Tensor,
               batch_X: Tensor,
               filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
               optimizer: str = "adam",
@@ -675,7 +679,6 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
               sinkhorn_kwargs={'p': 1, 'blur': 0.01, 'scaling': 0.8},
               scheduler=None,
               only_penalty=False,
-              regularize=False,
               detect_anomaly=False):
         """
         Train the neural density estimator using Wasserstein loss.
@@ -715,10 +718,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.3, shuffle=True)
             # n_samples = len(X_train)
-            n_samples = 1000
+            n_samples = 2000
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
                                                  noise, SNR, noise_model_dir, L,
-                                                 only_penalty=only_penalty, regularize=regularize)
+                                                 only_penalty=only_penalty, regularize=self.regularize)
             # t.set_description(
             #     f'Loss = {loss.item():.3f} (train), {bad_ratio.item():.3f} (bad ratio)')
             loss.backward()
@@ -726,7 +729,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             self.train_loss_history.append(loss.item())
 
             # get validation loss
-            vali_loss, _ = self._get_loss_NMF(self.X_vali, speculator, len(self.X_vali),
+            vali_loss, _ = self._get_loss_NMF(self.X_vali, speculator, n_samples, #len(self.X_vali),
                                               noise, SNR, noise_model_dir, L, only_penalty)
             self.vali_loss_history.append(vali_loss.item())
 
@@ -738,12 +741,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                 break
 
             # Save the model if the loss is the best so far
-            if loss.item() < self.min_loss:
-                # epoch - self.best_loss_epoch > self.patience and
-                self.min_loss = loss.item()
-                # Don't save model too frequently
-                self.best_loss_epoch = len(self.train_loss_history)
-                self.best_model = copy.deepcopy(self)
+            if vali_loss.item() < self.min_loss:
+                self.min_loss = vali_loss.item()
+                self.best_loss_epoch = len(self.vali_loss_history)
+                # self.best_model = copy.deepcopy(self)
                 if self.output_dir is not None:
                     self.save_model(
                         os.path.join(self.output_dir,

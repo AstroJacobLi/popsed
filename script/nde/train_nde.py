@@ -109,8 +109,8 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
             X_data, Y_truth, test_size=0.1)
         NDE_theta = WassersteinNeuralDensityEstimator(method='nsf',
                                                       name='NMF',
-                                                      num_transforms=15,  # 10
-                                                      num_bins=10,  # how smashed it is. 10
+                                                      num_transforms=15,  # 15,  # 10
+                                                      num_bins=5,  # 10,  # how smashed it is. 10
                                                       hidden_features=50,  # 120,
                                                       seed=seed,
                                                       output_dir=output_dir,
@@ -118,8 +118,8 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
                                                                    'std': [0.3, 0.3, 0.3,  # sfh
                                                                            0.3, 5,  # burst
                                                                            0.5,  # logzsol
-                                                                           0.6, 0.6, 0.6,  # dust
-                                                                           0.2, 0.6],  # redshift and log_m
+                                                                           0.6, 0.6, 1,  # dust
+                                                                           0.2, 0.9],  # redshift and log_m
                                                                    },
                                                       normalize=False)
         NDE_theta.build(
@@ -132,14 +132,30 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
         NDE_theta.params_name = speculator.params_name
 
         max_epochs = 6
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
-                                                        max_lr=6e-4,
-                                                        steps_per_epoch=100,
-                                                        epochs=max_epochs)
         try:
             print('### Training NDE for seed {0}'.format(seed))
-            for epoch in range(max_epochs):
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
+                                                            max_lr=2e-3,
+                                                            steps_per_epoch=100,
+                                                            epochs=max_epochs)
+            for epoch in range(2):
                 print('    Epoch {0}'.format(epoch))
+                print('    lr:', NDE_theta.optimizer.param_groups[0]['lr'])
+                NDE_theta.train(n_epochs=100,
+                                speculator=speculator,
+                                only_penalty=False,
+                                noise=noise, noise_model_dir=noise_model_dir,
+                                sinkhorn_kwargs={
+                                    'p': 1, 'blur': 0.1, 'scaling': 0.8},
+                                scheduler=scheduler
+                                )
+            ########
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
+                                                            max_lr=2e-4,
+                                                            steps_per_epoch=100,
+                                                            epochs=max_epochs)
+            for epoch in range(max_epochs):
+                print('\n    Epoch {0}'.format(epoch))
                 print('    lr:', NDE_theta.optimizer.param_groups[0]['lr'])
                 NDE_theta.train(n_epochs=100,
                                 speculator=speculator,
