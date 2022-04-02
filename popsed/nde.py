@@ -458,6 +458,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             embedding_net: nn.Module = nn.Identity(),
             output_dir='./nde_theta/',
             regularize=False,
+            NDE_prior=None,
             **kwargs):
         """
         Initialize Wasserstein Neural Density Estimator.
@@ -478,7 +479,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         num_bins: int, number of bins. Only works for `method='nsf'`.
         embedding_net: nn.Module, the embedding net. Default is nn.Identity().
         output_dir: str, the output directory. Default is './nde_theta/'.
-
+        regularize: bool, whether to transform the physical parameters using Gaussian CDF. 
+            Default is False.
+        NDE_prior: array, the prior (tophat bounds) used to do the transformation.
         """
         super(WassersteinNeuralDensityEstimator, self).__init__(
             normalize=normalize,
@@ -518,9 +521,14 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         else:
             self.penalty_powers = [100, 100, 100, 100, 50, 500]
 
+        # Regularize parameters, i.e., transform them with Gaussian CDF
+        if regularize and NDE_prior is None:
+            raise ValueError(
+                'NDE_prior must be provided when regularize is True.')
         self.regularize = regularize
+        self.NDE_prior = NDE_prior
 
-    def build(self, 
+    def build(self,
               batch_theta: Tensor,
               batch_X: Tensor,
               filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
@@ -551,7 +559,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         # dataloader = DataLoader(batch_X, batch_size=2000, shuffle=True)
         # self.X = [yield scaler.transform(x, device='cpu').detach() for x in dataloader]
-        self.X = scaler.transform(batch_X).detach()  # z-scored observed SEDs
+        self.X = self.scaler.transform(
+            batch_X).detach()  # z-scored observed SEDs
         self.filterset = filterset
         # scaler.device = self.device
 
@@ -564,7 +573,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         X_vali: Tensor, the photometry for validation.
         """
         self.X_vali = self.scaler.transform(
-            X_vali, device=X_vali.device)  # z-scored observed SEDs
+            X_vali, device=X_vali.device).detach()  # z-scored observed SEDs
 
     def _get_loss(self, X, speculator, n_samples,
                   noise, SNR, noise_model_dir,
@@ -633,21 +642,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                          'nsa'], 'Only support `snr`, `nsa`, or `None` now.'
 
         if regularize:
-            sample = inverse_transform_nmf_params(self.sample(n_samples))
+            sample = inverse_transform_nmf_params(
+                self.sample(n_samples), self.NDE_prior)
         else:
             sample = self.sample(n_samples)
-
-        Y = self.scaler.transform(
-            speculator._predict_mag_with_mass_redshift(
-                sample, filterset=self.filterset,
-                noise=noise, SNR=SNR, noise_model_dir=noise_model_dir),
-            device=self.device
-        )
-        bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
-            :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
-        Y = Y[~bad_mask]
-        # print('Bad mask num', bad_mask.sum())
-        # bad_mask |= (torch.isnan(Y).any(axis=1) | torch.isinf(Y).any(axis=1))
 
         # penalty term
         powers = torch.Tensor(self.penalty_powers).to(self.device)
@@ -655,17 +653,29 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                             torch.Tensor(self.bounds).to(self.device),
                             powers)
         # print('Number of inf:', torch.isinf(penalty).sum())
-        penalty = penalty[~torch.isinf(penalty)].mean()
-
-        dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
-        data_loss = 0.
-        for x in dataloader:
-            data_loss += loss_fn(Y, x.to(self.device))
+        penalty = penalty[~torch.isinf(penalty)].nanmean()
 
         if only_penalty:
             loss = penalty
         else:
-            loss = penalty + data_loss / len(dataloader)  # loss_fn(X, Y)
+            Y = self.scaler.transform(
+                speculator._predict_mag_with_mass_redshift(
+                    sample, filterset=self.filterset,
+                    noise=noise, SNR=SNR, noise_model_dir=noise_model_dir),
+                device=self.device
+            )
+            bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
+                :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
+            Y = Y[~bad_mask]
+            # print('Bad mask num', bad_mask.sum())
+            # bad_mask |= (torch.isnan(Y).any(axis=1) | torch.isinf(Y).any(axis=1))
+
+            dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
+            data_loss = 0.
+            for x in dataloader:
+                data_loss += loss_fn(Y, x.to(self.device))
+            # loss_fn(X, Y)# penalty +
+            loss = data_loss / len(dataloader) + penalty
 
         return loss, penalty
 
@@ -729,8 +739,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             self.train_loss_history.append(loss.item())
 
             # get validation loss
-            vali_loss, _ = self._get_loss_NMF(self.X_vali, speculator, n_samples, #len(self.X_vali),
-                                              noise, SNR, noise_model_dir, L, only_penalty)
+            vali_loss, _ = self._get_loss_NMF(self.X_vali, speculator, n_samples,  # len(self.X_vali),
+                                              noise, SNR, noise_model_dir, L,
+                                              only_penalty, regularize=self.regularize)
             self.vali_loss_history.append(vali_loss.item())
 
             t.set_description(
@@ -924,34 +935,102 @@ def inverse_sigmoid(x):
     """
     return torch.log(x / (1 - x))
 
+# def transform_nmf_params(params):
+#     """
+#     Transform (i.e., regularize) SED parameters.
+#     This might help with numerical stability.
 
-def transform_nmf_params(params):
+#     We transform those params at [0, 1] using a sigmoid function.
+#     We transform those parasm at [0, inf] using a log function.
+#     """
+#     _params = params.clone()
+#     _params[:, :3] = inverse_sigmoid(_params[:, :3].clone())
+#     _params[:, 3:5] = torch.log10(_params[:, 3:5].clone())
+#     _params[:, 6:8] = torch.log10(_params[:, 6:8].clone())
+#     _params[:, -2:-1] = torch.log10(_params[:, -2:-1].clone())
+#     return _params
+
+# def inverse_transform_nmf_params(params):
+#     """
+#     Inverse Transform (i.e., regularize) SED parameters.
+#     This might help with numerical stability.
+
+#     We transform those params at [0, 1] using a sigmoid function.
+#     We transform those parasm at [0, inf] using a log function.
+#     """
+#     _params = params.clone()
+#     _params[:, :3] = torch.sigmoid(_params[:, :3].clone())
+#     _params[:, 3:5] = 10**(_params[:, 3:5].clone())
+#     _params[:, 6:8] = 10**(_params[:, 6:8].clone())
+#     _params[:, -2:-1] = 10**(_params[:, -2:-1].clone())
+#     return _params
+
+
+from scipy.special import erf, erfinv
+
+
+def _gaussian_cdf(x, mu, sigma):
+    """
+    CDF of a Gaussian distribution.
+
+    :math:`F(x) = \\frac{1}{2}(1 + erf(\\frac{x - \\mu}{\\sigma}))`
+    """
+    if torch.is_tensor(x):
+        return 0.5 * (1 + torch.erf((x - mu) / (np.sqrt(2) * sigma)))
+    else:
+        return 0.5 * (1 + erf((x - mu) / (np.sqrt(2) * sigma)))
+
+
+def _inv_gaussian_cdf(x, mu, sigma):
+    """
+    Inverse CDF of a Gaussian distribution.
+
+    :math:`F^{-1}(x) = \\mu + \\sigma \\sqrt{2} \\text{erfinv}(2 \\times x - 1)`
+
+    """
+    if torch.is_tensor(x):
+        return mu + sigma * np.sqrt(2) * torch.erfinv(2 * x - 1)
+    else:
+        return mu + sigma * np.sqrt(2) * erfinv(2 * x - 1)
+
+
+def cdf_transform(x, bounds):
+    """
+    Transform from a Gaussian (which is x) to a Uniform with bounds as input.
+    """
+    return _gaussian_cdf(x, 0, 1) * (bounds[1] - bounds[0]) + bounds[0]
+
+
+def inv_cdf_transform(x, bounds):
+    """
+    Transform from a Uniform with bounds (which is x) to a Gaussian
+    """
+    return _inv_gaussian_cdf((x - bounds[0]) / (bounds[1] - bounds[0]), 0, 1)
+
+
+def transform_nmf_params(params, bounds):
     """
     Transform (i.e., regularize) SED parameters. 
-    This might help with numerical stability.
+    This might help with the interpretation of the prior.
 
-    We transform those params at [0, 1] using a sigmoid function.
-    We transform those parasm at [0, inf] using a log function.
+    Here the bounds is literally the bounds of the tophat prior in real parameter space.
     """
     _params = params.clone()
-    _params[:, :3] = inverse_sigmoid(_params[:, :3].clone())
-    _params[:, 3:5] = torch.log10(_params[:, 3:5].clone())
-    _params[:, 6:8] = torch.log10(_params[:, 6:8].clone())
-    _params[:, -2:-1] = torch.log10(_params[:, -2:-1].clone())
+    for i in range(_params.shape[1]):
+        _params[:, i:i +
+                1] = inv_cdf_transform(_params[:, i:i + 1].clone(), bounds[i])
     return _params
 
 
-def inverse_transform_nmf_params(params):
+def inverse_transform_nmf_params(params, bounds):
     """
-    Inverse Transform (i.e., regularize) SED parameters. 
-    This might help with numerical stability.
+    Inverse transform (i.e., regularize) SED parameters, to real parameter space.
+    This might help with the interpretation of the prior.
 
-    We transform those params at [0, 1] using a sigmoid function.
-    We transform those parasm at [0, inf] using a log function.
+    Here the bounds is literally the bounds of the tophat prior in real parameter space.
     """
     _params = params.clone()
-    _params[:, :3] = torch.sigmoid(_params[:, :3].clone())
-    _params[:, 3:5] = 10**(_params[:, 3:5].clone())
-    _params[:, 6:8] = 10**(_params[:, 6:8].clone())
-    _params[:, -2:-1] = 10**(_params[:, -2:-1].clone())
+    for i in range(_params.shape[1]):
+        _params[:, i:i +
+                1] = cdf_transform(_params[:, i:i + 1].clone(), bounds[i])
     return _params
