@@ -666,9 +666,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             )
             bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
                 :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
+            bad_mask |= (torch.isnan(Y).any(axis=1) |
+                         torch.isinf(Y).any(axis=1))
             Y = Y[~bad_mask]
             # print('Bad mask num', bad_mask.sum())
-            # bad_mask |= (torch.isnan(Y).any(axis=1) | torch.isinf(Y).any(axis=1))
 
             dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
             data_loss = 0.
@@ -728,7 +729,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.3, shuffle=True)
             # n_samples = len(X_train)
-            n_samples = 2000
+            n_samples = 1000
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
                                                  noise, SNR, noise_model_dir, L,
                                                  only_penalty=only_penalty, regularize=self.regularize)
@@ -755,7 +756,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             if vali_loss.item() < self.min_loss:
                 self.min_loss = vali_loss.item()
                 self.best_loss_epoch = len(self.vali_loss_history)
-                # self.best_model = copy.deepcopy(self)
+                self.best_model_state = self.net.state_dict()
                 if self.output_dir is not None:
                     self.save_model(
                         os.path.join(self.output_dir,

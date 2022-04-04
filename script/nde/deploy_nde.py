@@ -6,7 +6,7 @@ import sys
 import fire
 
 
-def deploy_training_job(seed_low, seed_high, name='NMF', output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise/'):
+def deploy_training_job(seed_low, seed_high, name='NMF', only_penalty=False, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise/'):
     ''' create slurm script and then submit 
     '''
     time = "24:00:00"
@@ -30,7 +30,7 @@ def deploy_training_job(seed_low, seed_high, name='NMF', output_dir='./NDE/NMF/n
         "module purge",
         ". /home/jiaxuanl/Research/popsed/script/setup_env.sh",
         "",
-        f"python train_nde.py --seed_low={seed_low} --seed_high={seed_high} --output_dir={output_dir}",
+        f"python train_nde.py --seed_low={seed_low} --seed_high={seed_high} --only_penalty={only_penalty} --output_dir={output_dir}",
         "",
         "",
         'now=$(date +"%T")',
@@ -63,3 +63,12 @@ if __name__ == '__main__':
 # python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=25 --seed_high=30
 # python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=30 --seed_high=35
 # python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=35 --seed_high=40
+
+####3 only train with penalty, without data.
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large_penalty/' --seed_low=0 --seed_high=5 --only_penalty=True
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large_penalty/' --seed_low=5 --seed_high=10 --only_penalty=True
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large_penalty/' --seed_low=10 --seed_high=15 --only_penalty=True
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large_penalty/' --seed_low=15 --seed_high=20 --only_penalty=True
+
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large_penalty/' --seed_low=20 --seed_high=30 --only_penalty=True
+# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large_penalty/' --seed_low=30 --seed_high=40 --only_penalty=True

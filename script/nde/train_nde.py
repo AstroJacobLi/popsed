@@ -92,7 +92,7 @@ X_data = X_data[flag].detach()
 Y_truth = Y_truth[flag]
 
 
-def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_new/'):
+def train_NDEs(seed_low, seed_high, only_penalty=False, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/'):
     # Start train NDEs
     from popsed.nde import WassersteinNeuralDensityEstimator
 
@@ -110,7 +110,7 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
         NDE_theta = WassersteinNeuralDensityEstimator(method='nsf',
                                                       name='NMF',
                                                       num_transforms=15,  # 15,  # 10
-                                                      num_bins=5,  # 10,  # how smashed it is. 10
+                                                      num_bins=10,  # 10,  # how smashed it is. 10
                                                       hidden_features=50,  # 120,
                                                       seed=seed,
                                                       output_dir=output_dir,
@@ -143,7 +143,7 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
                 print('    lr:', NDE_theta.optimizer.param_groups[0]['lr'])
                 NDE_theta.train(n_epochs=100,
                                 speculator=speculator,
-                                only_penalty=False,
+                                only_penalty=only_penalty,
                                 noise=noise, noise_model_dir=noise_model_dir,
                                 sinkhorn_kwargs={
                                     'p': 1, 'blur': 0.1, 'scaling': 0.8},
@@ -159,7 +159,7 @@ def train_NDEs(seed_low, seed_high, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noi
                 print('    lr:', NDE_theta.optimizer.param_groups[0]['lr'])
                 NDE_theta.train(n_epochs=100,
                                 speculator=speculator,
-                                only_penalty=False,
+                                only_penalty=only_penalty,
                                 noise=noise, noise_model_dir=noise_model_dir,
                                 sinkhorn_kwargs={
                                     'p': 1, 'blur': 0.1, 'scaling': 0.8},

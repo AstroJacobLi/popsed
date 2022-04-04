@@ -843,8 +843,8 @@ class Speculator():
 
         thresh = 5
         # if torch.any(log_spec > thresh):
-        # print(f'# of log spec > {thresh} params:',
-        #       (log_spec > thresh).any(dim=1).sum())
+        #     print(f'# of log spec > {thresh} params:',
+        #           (log_spec > thresh).any(dim=1).sum())
         log_spec[torch.any(log_spec > thresh, dim=1)] = -30
         spec = 10**log_spec
         return spec
@@ -1293,10 +1293,11 @@ class SuperSpeculator():
         #         spec_rest) > thresh).any(dim=1).sum())
         # such that interpolation will not do linear extrapolation.
         # spec_rest[:, 0] = 0.0  # torch.nan
+        # print(params[:, -2:-1])
         spec = self.transform(spec_rest, params[:, -2:-1], islog=False)
+        spec[spec == 0.0] = 1e-30  # aviod nan = log(0)
         thresh = 15
         spec[torch.any(torch.log10(spec_rest) > thresh, dim=1)] = 1e-30
-        # spec_rest[torch.any(torch.log10(spec_rest) > thresh, dim=1)] = 1e-30
         return spec
 
     def predict_spec(self, params, log_stellar_mass=None, redshift=None):
