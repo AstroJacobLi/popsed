@@ -496,8 +496,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         assert sps_model in ['NMF', 'tau'], 'Only support `NMF` and `tau` now.'
         self.sps_model = sps_model
         self.initial_pos = initial_pos
-        self.patience = 2
-        self.min_loss = 0.1
+        self.patience = 1
+        self.min_loss = 0.2
         self.best_loss_epoch = 0
 
         if seed is not None:
@@ -727,9 +727,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         for epoch in t:
             self.optimizer.zero_grad()
             X_train, _ = train_test_split(
-                self.X.detach(), test_size=0.3, shuffle=True)
+                self.X.detach(), test_size=0.2, shuffle=True)
             # n_samples = len(X_train)
-            n_samples = 1000
+            n_samples = 2000
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
                                                  noise, SNR, noise_model_dir, L,
                                                  only_penalty=only_penalty, regularize=self.regularize)

@@ -8,7 +8,8 @@ import sys
 import fire
 
 
-def deploy_training_job(seed_low, seed_high, name='NMF_CDF', only_penalty=False, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise/'):
+def deploy_training_job(seed_low, seed_high, name='NMF_CDF', num_bins=20, num_transforms=5, hidden_features=100,
+                        only_penalty=False, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise/'):
     ''' create slurm script and then submit 
     '''
     time = "24:00:00"
@@ -32,7 +33,7 @@ def deploy_training_job(seed_low, seed_high, name='NMF_CDF', only_penalty=False,
         "module purge",
         ". /home/jiaxuanl/Research/popsed/script/setup_env.sh",
         "",
-        f"python train_nde_cdf.py --seed_low={seed_low} --seed_high={seed_high} --num_transforms=20 --num_bins=40 --hidden_features=200 --only_penalty={only_penalty} --output_dir={output_dir}",
+        f"python train_nde_cdf.py --seed_low={seed_low} --seed_high={seed_high} --num_transforms={num_transforms} --num_bins={num_bins} --hidden_features={hidden_features} --only_penalty={only_penalty} --output_dir={output_dir}",
         "",
         "",
         'now=$(date +"%T")',
@@ -52,21 +53,22 @@ if __name__ == '__main__':
     fire.Fire(deploy_training_job)
 
 
-# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_new/' --seed_low=0 --seed_high=10
-# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_new/' --seed_low=11 --seed_high=20
-
-####### Large is 50000 samples ######
-# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=0 --seed_high=5
-# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=5 --seed_high=10
-# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=10 --seed_high=15
-# python deploy_nde.py --output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/' --seed_low=15 --seed_high=20
-
-# 3 only train with penalty, without data.
-
 # python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_largenet/' --seed_low=0 --seed_high=5
 # python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_largenet/' --seed_low=5 --seed_high=10
 # python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_largenet/' --seed_low=10 --seed_high=15
 # python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_largenet/' --seed_low=15 --seed_high=20
 
-# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_large/' --seed_low=0 --seed_high=5
-# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_large/' --seed_low=10 --seed_high=15
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_lowblur/' --seed_low=0 --seed_high=5
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_lowblur/' --seed_low=5 --seed_high=10
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_lowblur/' --seed_low=10 --seed_high=15
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_lowblur/' --seed_low=15 --seed_high=20
+
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-3/' --seed_low=0 --seed_high=5
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-3/' --seed_low=5 --seed_high=10
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-3/' --seed_low=10 --seed_high=15
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-3/' --seed_low=15 --seed_high=20
+
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-3_ntrans10/' --seed_low=0 --seed_high=5 --num_bins=40 --num_transforms=10 --hidden_features=100
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-3_ntrans10/' --seed_low=5 --seed_high=10 --num_bins=40 --num_transforms=10 --hidden_features=100
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-3_ntrans10/' --seed_low=10 --seed_high=15 --num_bins=40 --num_transforms=10 --hidden_features=100
+# python deploy_nde_cdf.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-3_ntrans10/' --seed_low=15 --seed_high=20 --num_bins=40 --num_transforms=10 --hidden_features=100

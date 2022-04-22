@@ -72,7 +72,7 @@ class FlatDirichletPrior(Prior):
         * Betancourt(2013) - https://arxiv.org/pdf/1010.3436.pdf
         '''
         assert tt.shape[-1] == self.ndim_sampling
-        tt_d = np.empty(tt.shape[:-1]+(self.ndim,))
+        tt_d = np.empty(tt.shape[:-1] + (self.ndim,))
 
         tt_d[..., 0] = 1. - tt[..., 0]
         for i in range(1, self.ndim_sampling):
@@ -84,11 +84,11 @@ class FlatDirichletPrior(Prior):
         ''' reverse the warped manifold transformation 
         '''
         assert tt_d.shape[-1] == self.ndim
-        tt = np.empty(tt_d.shape[:-1]+(self.ndim_sampling,))
+        tt = np.empty(tt_d.shape[:-1] + (self.ndim_sampling,))
 
         tt[..., 0] = 1. - tt_d[..., 0]
         for i in range(1, self.ndim_sampling):
-            tt[..., i] = 1. - (tt_d[..., i]/np.prod(tt[..., :i], axis=-1))
+            tt[..., i] = 1. - (tt_d[..., i] / np.prod(tt[..., :i], axis=-1))
         return tt
 
     def lnPrior(self, theta):
@@ -189,6 +189,32 @@ class GaussianPrior(Prior):
         return np.atleast_1d(self.multinorm.rvs())
 
 
+class BiGaussianPrior(Prior):
+    '''
+    Two Gaussians
+    '''
+
+    def __init__(self, mean, covariance, p1=0.3, label=None):
+        super().__init__(label=label)
+
+        self.mean = np.atleast_1d(mean)
+        self.covariance = np.atleast_1d(covariance)
+        self.ndim = self.mean.shape[0]
+        self.ndim_sampling = self.ndim
+        assert self.mean.shape[0] == self.covariance.shape[0]
+        self.multinorm = stat.multivariate_normal(self.mean, self.covariance)
+        self.p1 = p1
+
+    def lnPrior(self, theta):
+        return self.multinorm.logpdf(theta)
+
+    def sample(self):
+        if self._random.uniform() < self.p1:
+            return np.atleast_1d(self.multinorm.rvs()[0])
+        else:
+            return np.atleast_1d(self.multinorm.rvs()[1])
+
+
 class TruncatedNormalPrior(Prior):
     '''
     Truncated normal prior 
@@ -261,7 +287,7 @@ class PriorSeq(object):
         i = 0
         lnp_theta = 0.
         for prior in self.list_of_priors:
-            _lnp_theta = prior.lnPrior(theta[:, i:i+prior.ndim_sampling])
+            _lnp_theta = prior.lnPrior(theta[:, i:i + prior.ndim_sampling])
             if not np.isfinite(_lnp_theta):
                 return -np.inf
 
@@ -281,12 +307,12 @@ class PriorSeq(object):
     def transform(self, tt):
         ''' transform theta 
         '''
-        tt_p = np.empty(tt.shape[:-1]+(self.ndim,))
+        tt_p = np.empty(tt.shape[:-1] + (self.ndim,))
 
         i, _i = 0, 0
         for prior in self.list_of_priors:
             tt_p[..., i:i +
-                 prior.ndim] = prior.transform(tt[..., _i:_i+prior.ndim_sampling])
+                 prior.ndim] = prior.transform(tt[..., _i:_i + prior.ndim_sampling])
             i += prior.ndim
             _i += prior.ndim_sampling
         return tt_p
@@ -294,12 +320,12 @@ class PriorSeq(object):
     def untransform(self, tt):
         ''' transform theta 
         '''
-        tt_p = np.empty(tt.shape[:-1]+(self.ndim_sampling,))
+        tt_p = np.empty(tt.shape[:-1] + (self.ndim_sampling,))
 
         i, _i = 0, 0
         for prior in self.list_of_priors:
             tt_p[..., i:i +
-                 prior.ndim_sampling] = prior.untransform(tt[..., _i:_i+prior.ndim])
+                 prior.ndim_sampling] = prior.untransform(tt[..., _i:_i + prior.ndim])
             i += prior.ndim_sampling
             _i += prior.ndim
         return tt_p

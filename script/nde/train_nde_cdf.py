@@ -83,8 +83,8 @@ _thetas, _thetas_unt = gen_truth(N_samples=50000)
 # CDF transform
 from popsed.nde import transform_nmf_params, inverse_transform_nmf_params
 _prior_NDE = speculator.bounds.copy()
-_prior_NDE[-2] = np.array([0.001, 0.5])
-_prior_NDE[-1] = np.array([7, 13])
+_prior_NDE[-2] = np.array([0, 0.3])
+_prior_NDE[-1] = np.array([8, 12])
 
 Y_truth = np.hstack([_thetas_unt[:, 1:],  # params taken by emulator, including redshift (for t_age)
                      _thetas_unt[:, 0:1],  # stellar mass
@@ -106,7 +106,7 @@ Y_truth = Y_truth[flag]
 Y_truth_tr = Y_truth_tr[flag]
 
 
-def train_NDEs(seed_low, seed_high, num_transforms=15, num_bins=30, hidden_features=128,
+def train_NDEs(seed_low, seed_high, num_transforms=5, num_bins=40, hidden_features=100,
                only_penalty=False, output_dir='./NDE/NMF/nde_theta_NMF_sdss_noise_large/'):
     # Start train NDEs
     from popsed.nde import WassersteinNeuralDensityEstimator
@@ -146,7 +146,7 @@ def train_NDEs(seed_low, seed_high, num_transforms=15, num_bins=30, hidden_featu
         try:
             print('### Training NDE for seed {0}'.format(seed))
             scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
-                                                            max_lr=1e-3,
+                                                            max_lr=6e-3,
                                                             steps_per_epoch=100,
                                                             epochs=max_epochs)
             for epoch in range(max_epochs):
@@ -157,7 +157,7 @@ def train_NDEs(seed_low, seed_high, num_transforms=15, num_bins=30, hidden_featu
                                 only_penalty=only_penalty,
                                 noise=noise, noise_model_dir=noise_model_dir,
                                 sinkhorn_kwargs={
-                                    'p': 1, 'blur': 0.1, 'scaling': 0.8},
+                                    'p': 1, 'blur': 0.01, 'scaling': 0.5},
                                 scheduler=scheduler
                                 )
             print(f'    Succeeded in training for {max_epochs} epochs!')
