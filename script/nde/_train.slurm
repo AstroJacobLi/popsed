@@ -16,7 +16,7 @@ echo "start time ... $now"
 module purge
 . /home/jiaxuanl/Research/popsed/script/setup_env.sh
 
-python train_nde_cdf.py --seed_low=15 --seed_high=20 --num_transforms=20 --num_bins=40 --hidden_features=200 --only_penalty=False --output_dir=./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_largenet/
+python train_nde_cdf.py --seed_low=15 --seed_high=20 --num_transforms=5 --num_bins=40 --hidden_features=100 --only_penalty=False --output_dir=./NDE/NMF/nde_theta_NMF_CDF_sdss_noise_blur1e-2/
 
 
 now=$(date +"%T")
