@@ -1261,7 +1261,8 @@ class SuperSpeculator():
         else:
             return spectra_restframe
 
-    def _predict_spec_with_mass_redshift(self, params):
+    def _predict_spec_with_mass_redshift(self, params,
+                                         external_redshift=None):
         """
         Predict the corresponding spectra (in linear scale) for given physical parameters.
         **We have to redshift the spectra after combining them in restframe.**
@@ -1294,7 +1295,10 @@ class SuperSpeculator():
         # such that interpolation will not do linear extrapolation.
         # spec_rest[:, 0] = 0.0  # torch.nan
         # print(params[:, -2:-1])
-        spec = self.transform(spec_rest, params[:, -2:-1], islog=False)
+        if external_redshift is None:
+            spec = self.transform(spec_rest, params[:, -2:-1], islog=False)
+        else:
+            spec = self.transform(spec_rest, external_redshift, islog=False)
         spec[spec == 0.0] = 1e-30  # aviod nan = log(0)
         thresh = 15
         spec[torch.any(torch.log10(spec_rest) > thresh, dim=1)] = 1e-30
@@ -1324,9 +1328,11 @@ class SuperSpeculator():
         if redshift is None:
             redshift = torch.zeros_like(params[:, 0:1])
 
-        return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device))
+        return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass]).to(self.device),
+                                                     external_redshift=redshift)
 
     def _predict_mag_with_mass_redshift(self, params,
+                                        external_redshift=None,
                                         filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
                                         noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10):
         """
@@ -1376,7 +1382,7 @@ class SuperSpeculator():
         # into account in the `transform` (redshifting).
         if self._model == 'NMF':
             _spec = self._predict_spec_with_mass_redshift(
-                params) * self.lightspeed / self.wavelength**2 * self.to_cgs_at_10pc
+                params, external_redshift=external_redshift) * self.lightspeed / self.wavelength**2 * self.to_cgs_at_10pc
         else:
             raise NotImplementedError('Only NMF-based emulator is supported.')
         _spec = torch.nan_to_num(_spec, 0.0)
@@ -1463,4 +1469,5 @@ class SuperSpeculator():
             log_stellar_mass = torch.zeros_like(params[:, 0:1])
         if redshift is None:
             redshift = torch.zeros_like(params[:, 0:1])
-        return self._predict_mag_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device), **kwargs)
+        return self._predict_mag_with_mass_redshift(torch.hstack([params, log_stellar_mass]).to(self.device), external_redshift=redshift,
+                                                    **kwargs)
