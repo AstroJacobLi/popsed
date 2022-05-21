@@ -1435,7 +1435,7 @@ class SuperSpeculator():
         for i, data in enumerate(dataloader):
             data = data.to(self.device)
             mags[i * 200:(i + 1) * 200] = self._predict_mag_with_mass_redshift(
-                data, filterset, noise, noise_model_dir, SNR).clone().cpu()
+                data, filterset=filterset, noise=noise, noise_model_dir=noise_model_dir, SNR=SNR).clone().cpu()
         torch.cuda.empty_cache()
         return mags
         # mags = self._predict_mag_with_mass_redshift(

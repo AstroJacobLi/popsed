@@ -647,16 +647,21 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         else:
             sample = self.sample(n_samples)
 
+        if self.external_redshift_data is not None:
+            _z = torch.Tensor(np.random.choice(self.external_redshift_data, n_samples)[
+                :, None]).to(self.device)
+            sample = torch.hstack([sample[:, :-1], _z, sample[:, -1:]])
+
         # penalty term
-        powers = torch.Tensor(self.penalty_powers).to(self.device)
-        penalty = log_prior(sample,
-                            torch.Tensor(self.bounds).to(self.device),
-                            powers)
-        # print('Number of inf:', torch.isinf(penalty).sum())
-        penalty = penalty[~torch.isinf(penalty)].nanmean()
+        # powers = torch.Tensor(self.penalty_powers).to(self.device)
+        # penalty = log_prior(sample,
+        #                     torch.Tensor(self.bounds).to(self.device),
+        #                     powers)
+        # # print('Number of inf:', torch.isinf(penalty).sum())
+        # penalty = penalty[~torch.isinf(penalty)].nanmean()
 
         if only_penalty:
-            loss = penalty
+            loss = 0  # penalty
         else:
             Y = self.scaler.transform(
                 speculator._predict_mag_with_mass_redshift(
@@ -676,9 +681,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             for x in dataloader:
                 data_loss += loss_fn(Y, x.to(self.device))
             # loss_fn(X, Y)# penalty +
-            loss = data_loss / len(dataloader) + penalty
+            loss = data_loss / len(dataloader)  # + penalty
 
-        return loss, penalty
+        return loss, torch.zeros_like(loss)  # penalty
 
     def train(self,
               n_epochs: int = 100,
@@ -729,10 +734,15 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.2, shuffle=True)
             # n_samples = len(X_train)
-            n_samples = 4000
+            n_samples = 5000
+            # aggr_loss = 0
+            # for i in range(3):
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
                                                  noise, SNR, noise_model_dir, L,
                                                  only_penalty=only_penalty, regularize=self.regularize)
+            #     aggr_loss += loss
+            # aggr_loss /= 3
+            # aggr_loss.backward()
             # t.set_description(
             #     f'Loss = {loss.item():.3f} (train), {bad_ratio.item():.3f} (bad ratio)')
             loss.backward()
