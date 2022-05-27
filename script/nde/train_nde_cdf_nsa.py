@@ -50,7 +50,9 @@ flag &= ((mags_nsa[:, 2] - mags_nsa[:, 3]) > 0)
 flag &= ((mags_nsa[:, 2] - mags_nsa[:, 4]) > 0)
 mags_nsa = mags_nsa[flag]
 
-z_nsa = np.load('./nsa_sedflow/nsa_redshift.npy')[flag]
+# z_nsa = np.load('./nsa_sedflow/nsa_redshift.npy')[flag]
+sedflow_sample = np.load('./nsa_sedflow/nsa_sedflow.posterior.reorganized.npy')
+z_nsa = np.random.choice(sedflow_sample[:, -2], len(mags_nsa))
 
 X_data = torch.Tensor(mags_nsa[:, :])
 print('Total number of samples:', len(X_data))
@@ -62,13 +64,13 @@ for i in range(2):
     X_datas.append(X_data[ind].to('cuda'))
 
 from geomloss import SamplesLoss
-L = SamplesLoss(loss='sinkhorn', **{'p': 1, 'blur': 1e-2, 'scaling': 0.7})
+L = SamplesLoss(loss='sinkhorn', **{'p': 1, 'blur': 0.1, 'scaling': 0.5})
 intr_loss = L(X_datas[0], X_datas[1]).item()
 print("Intrinsic sampling loss:", intr_loss)
 
 
 _prior_NDE = speculator.bounds.copy()
-_prior_NDE[-2] = np.array([0., 0.055])
+_prior_NDE[-2] = np.array([0., 0.07])
 _prior_NDE[-1] = np.array([7.5, 12.5])
 
 _prior_NDE = np.vstack([_prior_NDE[:-2], _prior_NDE[-1:]])
@@ -81,6 +83,8 @@ def train_NDEs(seed_low, seed_high, num_transforms=5, num_bins=40, hidden_featur
 
     _bounds = np.zeros_like(speculator.bounds)
     _bounds = np.zeros_like(_bounds)[:-1]
+    _bounds = np.vstack([-np.abs(np.random.normal(size=len(_bounds)) / 30),
+                         np.abs(np.random.normal(size=len(_bounds)) / 30)]).T
     _stds = np.ones(len(_bounds))
 
     for seed in range(seed_low, seed_high):
@@ -114,12 +118,12 @@ def train_NDEs(seed_low, seed_high, num_transforms=5, num_bins=40, hidden_featur
         print('Total number of params in the model:',
               sum(p.numel() for p in NDE_theta.net.parameters() if p.requires_grad))
 
-        max_epochs = 6
-        blurs = [0.5, 0.4, 0.3, 0.2, 0.1, 0.1]
+        max_epochs = 5
+        blurs = [0.2, 0.1, 0.1, 0.1, 0.1]
         try:
             print('### Training NDE for seed {0}'.format(seed))
             scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
-                                                            max_lr=6e-3,
+                                                            max_lr=5e-4,
                                                             steps_per_epoch=100,
                                                             epochs=max_epochs)
             for i, epoch in enumerate(range(max_epochs)):
@@ -130,7 +134,7 @@ def train_NDEs(seed_low, seed_high, num_transforms=5, num_bins=40, hidden_featur
                                 only_penalty=only_penalty,
                                 noise=noise, noise_model_dir=noise_model_dir,
                                 sinkhorn_kwargs={
-                                    'p': 1, 'blur': blurs[i], 'scaling': 0.7},
+                                    'p': 1, 'blur': blurs[i], 'scaling': 0.5},
                                 scheduler=scheduler
                                 )
             print(f'    Succeeded in training for {max_epochs} epochs!')
