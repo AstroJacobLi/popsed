@@ -3,6 +3,7 @@ Stellar population inference for galaxy population with neural density estimator
 
 Overleaf draft link: https://www.overleaf.com/3537387468zsymwpdgzmsr
 
+![image](https://user-images.githubusercontent.com/29670581/173158592-1e8ff826-c95b-40af-bb85-02f60c679de6.png)
 
 
 ### Environment on `tiger`
