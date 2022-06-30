@@ -16,7 +16,7 @@ from sbi.utils.torchutils import create_alternating_binary_mask
 import copy
 import os
 from tqdm import trange
-import pickle
+import dill as pickle
 import numpy as np
 
 from scipy.special import digamma
@@ -509,8 +509,11 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         self.output_dir = output_dir
         if (self.output_dir is not None):
-            if not os.path.exists(self.output_dir):
-                os.makedirs(self.output_dir)
+            try:
+                if not os.path.exists(self.output_dir):
+                    os.makedirs(self.output_dir)
+            except:
+                pass
 
         # Set penalty term
         if self.sps_model == 'NMF':
@@ -642,15 +645,22 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                          'nsa'], 'Only support `snr`, `nsa`, or `None` now.'
 
         if regularize:
-            sample = inverse_transform_nmf_params(
-                self.sample(n_samples), self.NDE_prior)
+            if hasattr(self, "cdf_z") and self.cdf_z is not None:
+                sample = inverse_transform_nmf_params_given_z(
+                    self.sample(n_samples), self.NDE_prior, self.cdf_z)
+            elif hasattr(self, "cdf_mass") and self.cdf_mass is not None:
+                sample = inverse_transform_nmf_params_given_mass(
+                    self.sample(n_samples), self.NDE_prior, self.cdf_mass)
+            else:
+                sample = inverse_transform_nmf_params(
+                    self.sample(n_samples), self.NDE_prior)
         else:
             sample = self.sample(n_samples)
 
-        if self.external_redshift_data is not None:
-            _z = torch.Tensor(np.random.choice(self.external_redshift_data, n_samples)[
-                :, None]).to(self.device)
-            sample = torch.hstack([sample[:, :-1], _z, sample[:, -1:]])
+        # if self.external_redshift_data is not None:
+        #     _z = torch.Tensor(np.random.choice(self.external_redshift_data, n_samples)[
+        #         :, None]).to(self.device)
+        #     sample = torch.hstack([sample[:, :-1], _z, sample[:, -1:]])
 
         # penalty term
         # powers = torch.Tensor(self.penalty_powers).to(self.device)
@@ -1035,7 +1045,7 @@ def transform_nmf_params(params, bounds):
 
 def inverse_transform_nmf_params(params, bounds):
     """
-    Inverse transform (i.e., regularize) SED parameters, to real parameter space.
+    Inverse transform (i.e., regularize) SED parameters, from CDF space, to real parameter space.
     This might help with the interpretation of the prior.
 
     Here the bounds is literally the bounds of the tophat prior in real parameter space.
@@ -1044,4 +1054,68 @@ def inverse_transform_nmf_params(params, bounds):
     for i in range(_params.shape[1]):
         _params[:, i:i +
                 1] = cdf_transform(_params[:, i:i + 1].clone(), bounds[i])
+    return _params
+
+
+def transform_nmf_params_given_z(params, bounds, cdf_z):
+    """
+    Transform (i.e., regularize) SED parameters. 
+    This might help with the interpretation of the prior.
+
+    Here the bounds is literally the bounds of the tophat prior in real parameter space.
+    """
+    _params = params.clone()
+    for i in range(_params.shape[1]):
+        _params[:, i:i +
+                1] = inv_cdf_transform(_params[:, i:i + 1].clone(), bounds[i])
+
+    _params[:, -2:-1] = cdf_z(_params[:, -2:-1].clone(), bounds[-2])
+    return _params
+
+
+def transform_nmf_params_given_mass(params, bounds, cdf_mass):
+    """
+    Transform (i.e., regularize) SED parameters. 
+    This might help with the interpretation of the prior.
+
+    Here the bounds is literally the bounds of the tophat prior in real parameter space.
+    """
+    _params = params.clone()
+    for i in range(_params.shape[1]):
+        _params[:, i:i +
+                1] = inv_cdf_transform(_params[:, i:i + 1].clone(), bounds[i])
+
+    _params[:, -1:] = cdf_mass(_params[:, -1:].clone(), bounds[-1])
+    return _params
+
+
+def inverse_transform_nmf_params_given_z(params, bounds, icdf_z):
+    """
+    Inverse transform (i.e., regularize) SED parameters, from CDF space, to real parameter space.
+    This might help with the interpretation of the prior.
+
+    Here the bounds is literally the bounds of the tophat prior in real parameter space.
+    """
+    _params = params.clone()
+    for i in range(_params.shape[1]):
+        _params[:, i:i +
+                1] = cdf_transform(_params[:, i:i + 1].clone(), bounds[i])
+
+    _params[:, -2:-1] = icdf_z(_params[:, -2:-1].clone(), bounds[-2])
+    return _params
+
+
+def inverse_transform_nmf_params_given_mass(params, bounds, icdf_mass):
+    """
+    Inverse transform (i.e., regularize) SED parameters, from CDF space, to real parameter space.
+    This might help with the interpretation of the prior.
+
+    Here the bounds is literally the bounds of the tophat prior in real parameter space.
+    """
+    _params = params.clone()
+    for i in range(_params.shape[1]):
+        _params[:, i:i +
+                1] = cdf_transform(_params[:, i:i + 1].clone(), bounds[i])
+
+    _params[:, -1:] = icdf_mass(_params[:, -1:].clone(), bounds[-1])
     return _params

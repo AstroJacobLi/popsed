@@ -55,7 +55,17 @@ if __name__ == '__main__':
     fire.Fire(deploy_training_job)
 
 
-# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=1 --seed_high=5 --num_bins=40 --num_transforms=10 --hidden_features=200
-# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=5 --seed_high=10 --num_bins=40 --num_transforms=10 --hidden_features=200
-# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=10 --seed_high=15 --num_bins=40 --num_transforms=10 --hidden_features=200
-# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=15 --seed_high=20 --num_bins=40 --num_transforms=10 --hidden_features=200
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=1 --seed_high=5 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=5 --seed_high=10 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=10 --seed_high=15 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=15 --seed_high=20 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=20 --seed_high=25 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=25 --seed_high=30 --num_bins=40 --num_transforms=10 --hidden_features=50
+
+
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=30 --seed_high=35 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=35 --seed_high=40 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=40 --seed_high=45 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=45 --seed_high=50 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=50 --seed_high=55 --num_bins=40 --num_transforms=10 --hidden_features=50
+# python deploy_nde_cdf_nsa.py --output_dir='./NDE/NMF/nde_theta_NMF_CDF_NSA_given_redshift_blur/' --seed_low=55 --seed_high=60 --num_bins=40 --num_transforms=10 --hidden_features=50

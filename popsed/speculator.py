@@ -1249,7 +1249,9 @@ class SuperSpeculator():
 
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
             # 1e5 because the absolute mag is 10pc.
+            # dfactor = ((distances * 1e5)**2 / (1 + z))
             dfactor = ((distances * 1e5)**2 / (1 + z))
+            # dfactor = ((distances * 1e5)**2 * (1 + z))
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
             if islog:
@@ -1382,7 +1384,7 @@ class SuperSpeculator():
         # into account in the `transform` (redshifting).
         if self._model == 'NMF':
             _spec = self._predict_spec_with_mass_redshift(
-                params, external_redshift=external_redshift) * self.lightspeed / self.wavelength**2 * self.to_cgs_at_10pc
+                params, external_redshift=external_redshift) * self.lightspeed / self.wavelength**2 * self.to_cgs_at_10pc  # / external_redshift
         else:
             raise NotImplementedError('Only NMF-based emulator is supported.')
         _spec = torch.nan_to_num(_spec, 0.0)
