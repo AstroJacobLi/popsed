@@ -857,7 +857,7 @@ class Speculator():
 
         return spec
 
-    def _calc_transmission(self, filterset):
+    def _calc_transmission(self, filterset, filter_dir=None):
         import sys
         sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
 
@@ -878,7 +878,11 @@ class Speculator():
         # transmission efficiency
         _epsilon = np.zeros((len(filterset), len(x)))
         _zero_counts = np.zeros(len(filterset))
-        filters = observate.load_filters(filterset)
+        if filter_dir is None:
+            filters = observate.load_filters(filterset)
+        else:
+            filters = observate.load_filters(filterset, directory=filter_dir)
+
         for i in range(len(filterset)):
             _epsilon[i] = interp1d(filters[i].wavelength,
                                    filters[i].transmission,
@@ -886,6 +890,7 @@ class Speculator():
                                    fill_value=0)(x)
             _zero_counts[i] = filters[i].ab_zero_counts
         self.filterset = filterset
+        self.filter_dir = filter_dir
         self.transmission_effiency = Tensor(_epsilon).to(self.device)
         self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 
@@ -1119,7 +1124,7 @@ class SuperSpeculator():
 
         self.bounds = np.array([self.prior[key] for key in self.params_name])
 
-    def _calc_transmission(self, filterset):
+    def _calc_transmission(self, filterset, filter_dir=None):
         import sys
         sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
 
@@ -1140,7 +1145,11 @@ class SuperSpeculator():
         # transmission efficiency
         _epsilon = np.zeros((len(filterset), len(x)))
         _zero_counts = np.zeros(len(filterset))
-        filters = observate.load_filters(filterset)
+        if filter_dir is None:
+            filters = observate.load_filters(filterset)
+        else:
+            filters = observate.load_filters(filterset, directory=filter_dir)
+
         for i in range(len(filterset)):
             _epsilon[i] = interp1d(filters[i].wavelength,
                                    filters[i].transmission,
@@ -1148,6 +1157,7 @@ class SuperSpeculator():
                                    fill_value=0)(x)
             _zero_counts[i] = filters[i].ab_zero_counts
         self.filterset = filterset
+        self.filter_dir = filter_dir
         self.transmission_effiency = Tensor(_epsilon).to(self.device)
         self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 

@@ -665,7 +665,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         # penalty term
         # powers = torch.Tensor(self.penalty_powers).to(self.device)
         # penalty = log_prior(sample,
-        #                     torch.Tensor(self.bounds).to(self.device),
+        #                     torch.Tensor(self.NDE_prior).to(self.device),
         #                     powers)
         # # print('Number of inf:', torch.isinf(penalty).sum())
         # penalty = penalty[~torch.isinf(penalty)].nanmean()
