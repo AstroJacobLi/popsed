@@ -641,8 +641,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         loss: Tensor, the loss.
         penalty: Tensor, the penalty term.
         """
-        assert noise in [None, 'snr',
-                         'nsa'], 'Only support `snr`, `nsa`, or `None` now.'
+        assert noise in [None, 'snr', 'gama',
+                         'nsa'], 'Only support `snr`, `nsa`, `gama`, or `None` now.'
 
         if regularize:
             if hasattr(self, "cdf_z") and self.cdf_z is not None:
@@ -656,6 +656,16 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                     self.sample(n_samples), self.NDE_prior)
         else:
             sample = self.sample(n_samples)
+
+        if hasattr(self, 'anpe_mass_given_z') and self.anpe_mass_given_z is not None:
+            # with torch.no_grad():
+            sample = torch.hstack(
+                [sample, self.anpe_mass_given_z.sample(1, context=sample[:, -1:])[:, 0]])
+
+        if hasattr(self, 'anpe_mass_given_all') and self.anpe_mass_given_all is not None:
+            # with torch.no_grad():
+            sample = torch.hstack(
+                [sample, self.anpe_mass_given_all.sample(1, context=sample[:, :])[:, 0]])
 
         # if self.external_redshift_data is not None:
         #     _z = torch.Tensor(np.random.choice(self.external_redshift_data, n_samples)[

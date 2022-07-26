@@ -324,6 +324,8 @@ def FC(input_size, output_size):
     """
     return nn.Sequential(
         nn.Linear(input_size, output_size),
+        # nn.Sigmoid(),
+        # nn.ReLU(),
         # nn.BatchNorm1d(output_size),
         CustomActivation(output_size),
         # nn.Dropout(p=0.5)
