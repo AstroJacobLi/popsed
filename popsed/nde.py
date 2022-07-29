@@ -1,6 +1,7 @@
 '''
 Neural density estimator for population-level inference. 
 '''
+import gc
 import torch
 from torch import nn, Tensor, optim
 import torch.nn.functional as F
@@ -534,6 +535,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
     def build(self,
               batch_theta: Tensor,
               batch_X: Tensor,
+              z_score=True,
               filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
               optimizer: str = "adam",
               lr=1e-3, **kwargs):
@@ -552,6 +554,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         """
         from torch.utils.data import DataLoader
         super().build(batch_theta, optimizer, lr, **kwargs)
+        
+        if not torch.is_tensor(batch_X):
+            batch_X = torch.tensor(batch_X, device='cpu')
 
         # We z-score the input photometry data
         # scaler = StandardScaler(device=self.device)
@@ -559,11 +564,17 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         # because batch_X is on CPU, we have to first train on CPU
         scaler.fit(batch_X)
         self.scaler = scaler
-
+        self.z_score = z_score
         # dataloader = DataLoader(batch_X, batch_size=2000, shuffle=True)
         # self.X = [yield scaler.transform(x, device='cpu').detach() for x in dataloader]
-        self.X = self.scaler.transform(
-            batch_X).detach()  # z-scored observed SEDs
+        if self.z_score:
+            self.X = self.scaler.transform(
+                batch_X).detach()  # z-scored observed SEDs
+        else:
+            self.X = batch_X.detach()
+
+        self.X = self.X.to(self.device)
+
         self.filterset = filterset
         # scaler.device = self.device
 
@@ -575,8 +586,15 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         ----------
         X_vali: Tensor, the photometry for validation.
         """
-        self.X_vali = self.scaler.transform(
-            X_vali, device=X_vali.device).detach()  # z-scored observed SEDs
+        if not torch.is_tensor(X_vali):
+            X_vali = torch.tensor(X_vali, device='cpu')
+        if self.z_score:
+            self.X_vali = self.scaler.transform(
+                X_vali, device=X_vali.device).detach()  # z-scored observed SEDs
+        else:
+            self.X_vali = X_vali.detach()
+
+        self.X_vali = self.X_vali.to(self.device)
 
     def _get_loss(self, X, speculator, n_samples,
                   noise, SNR, noise_model_dir,
@@ -616,7 +634,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
     def _get_loss_NMF(self, X, speculator, n_samples,
                       noise, SNR, noise_model_dir,
-                      loss_fn, only_penalty=False, regularize=False):
+                      loss_fn, add_penalty=False, regularize=False):
         """
         The most important funcgtion in this class. This defines the loss.
         This function only works for NMF-based SPS.
@@ -633,7 +651,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         SNR: float, the signal-to-noise ratio to use if noise is 'snr'.
         noise_model_dir: str, the directory of the NSA noise model.
         loss_fn: the loss function to use. Here we use Wasserstein loss.
-        only_penalty: bool, whether to only use the penalty term as loss.
+        add_penalty: bool, whether to only add the penalty term to loss.
         regularize: bool. Whether the SED params are transformed using log10 and sigmoid.
 
         Returns
@@ -679,31 +697,49 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         #                     powers)
         # # print('Number of inf:', torch.isinf(penalty).sum())
         # penalty = penalty[~torch.isinf(penalty)].nanmean()
-
-        if only_penalty:
-            loss = 0  # penalty
-        else:
+        
+        
+        Y = speculator._predict_mag_with_mass_redshift(
+                sample, filterset=self.filterset,
+                noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+        if self.z_score:
             Y = self.scaler.transform(
-                speculator._predict_mag_with_mass_redshift(
-                    sample, filterset=self.filterset,
-                    noise=noise, SNR=SNR, noise_model_dir=noise_model_dir),
+                mags,
                 device=self.device
             )
-            bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
-                :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
-            bad_mask |= (torch.isnan(Y).any(axis=1) |
-                         torch.isinf(Y).any(axis=1))
-            Y = Y[~bad_mask]
-            # print('Bad mask num', bad_mask.sum())
+        bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
+            :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
+        bad_mask |= (torch.isnan(Y).any(axis=1) |
+                        torch.isinf(Y).any(axis=1))
+        Y = Y[~bad_mask]
+        # print('Bad mask num', bad_mask.sum())
+        # penalty = torch.sum(Y[:, 2] > (19.65 - self.scaler.mean[2]) / self.scaler.std[2]) / len(Y) * 10
+        penalty = torch.sum(Y[:, 2] > 19.65) / len(Y) * 10
+        # dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
+        # data_loss = 0.
+        # for x in dataloader:
+        #     data_loss += loss_fn(Y, x.to(self.device))
+        
+        # loss = data_loss / len(dataloader)  # + penalty
+        
+        loss = loss_fn(Y, X)
 
-            dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
-            data_loss = 0.
-            for x in dataloader:
-                data_loss += loss_fn(Y, x.to(self.device))
-            # loss_fn(X, Y)# penalty +
-            loss = data_loss / len(dataloader)  # + penalty
+        if add_penalty:
+            # loss += loss_fn((1 * (X[:100, 2:3].clone() - 19.65)), (1 * (Y[:100, 2:3].clone() - 19.65))) 
+            loss += loss_fn(10**(1 * (X[:, 2:3].clone() - 19.65)), 10**(1 * (Y[:, 2:3].clone() - 19.65)))
 
-        return loss, torch.zeros_like(loss)  # penalty
+        sample = None
+        x = None
+        y = None
+        Y = None
+        dataloader = None
+        X = X.to('cpu')
+        gc.collect()
+        torch.cuda.empty_cache()
+        # Y.to('cpu')
+        # loss_fn(X, Y)# penalty +
+
+        return loss, penalty #torch.zeros_like(loss)  # penalty
 
     def train(self,
               n_epochs: int = 100,
@@ -714,7 +750,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
               noise_model_dir=None,
               sinkhorn_kwargs={'p': 1, 'blur': 0.01, 'scaling': 0.8},
               scheduler=None,
-              only_penalty=False,
+              add_penalty=False,
               detect_anomaly=False):
         """
         Train the neural density estimator using Wasserstein loss.
@@ -754,12 +790,12 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.2, shuffle=True)
             # n_samples = len(X_train)
-            n_samples = 5000
+            n_samples = 6000
             # aggr_loss = 0
             # for i in range(3):
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
                                                  noise, SNR, noise_model_dir, L,
-                                                 only_penalty=only_penalty, regularize=self.regularize)
+                                                 add_penalty=add_penalty, regularize=self.regularize)
             #     aggr_loss += loss
             # aggr_loss /= 3
             # aggr_loss.backward()
@@ -772,7 +808,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             # get validation loss
             vali_loss, _ = self._get_loss_NMF(self.X_vali, speculator, n_samples,  # len(self.X_vali),
                                               noise, SNR, noise_model_dir, L,
-                                              only_penalty, regularize=self.regularize)
+                                              add_penalty, regularize=self.regularize)
             self.vali_loss_history.append(vali_loss.item())
 
             t.set_description(

@@ -710,6 +710,7 @@ class Speculator():
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
             # 1e5 because the absolute mag is 10pc.
             dfactor = ((distances * 1e5)**2 / (1 + z))
+            # dfactor = ((distances * 1e5)**2)
 
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
@@ -1261,9 +1262,8 @@ class SuperSpeculator():
 
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
             # 1e5 because the absolute mag is 10pc.
-            # dfactor = ((distances * 1e5)**2 / (1 + z))
             dfactor = ((distances * 1e5)**2 / (1 + z))
-            # dfactor = ((distances * 1e5)**2 * (1 + z))
+            # dfactor = ((distances * 1e5)**2)
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
             if islog:
