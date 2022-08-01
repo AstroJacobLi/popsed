@@ -324,6 +324,8 @@ def FC(input_size, output_size):
     """
     return nn.Sequential(
         nn.Linear(input_size, output_size),
+        # nn.Sigmoid(),
+        # nn.ReLU(),
         # nn.BatchNorm1d(output_size),
         CustomActivation(output_size),
         # nn.Dropout(p=0.5)
@@ -708,6 +710,7 @@ class Speculator():
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
             # 1e5 because the absolute mag is 10pc.
             dfactor = ((distances * 1e5)**2 / (1 + z))
+            # dfactor = ((distances * 1e5)**2)
 
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
@@ -857,7 +860,7 @@ class Speculator():
 
         return spec
 
-    def _calc_transmission(self, filterset):
+    def _calc_transmission(self, filterset, filter_dir=None):
         import sys
         sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
 
@@ -878,7 +881,11 @@ class Speculator():
         # transmission efficiency
         _epsilon = np.zeros((len(filterset), len(x)))
         _zero_counts = np.zeros(len(filterset))
-        filters = observate.load_filters(filterset)
+        if filter_dir is None:
+            filters = observate.load_filters(filterset)
+        else:
+            filters = observate.load_filters(filterset, directory=filter_dir)
+
         for i in range(len(filterset)):
             _epsilon[i] = interp1d(filters[i].wavelength,
                                    filters[i].transmission,
@@ -886,6 +893,7 @@ class Speculator():
                                    fill_value=0)(x)
             _zero_counts[i] = filters[i].ab_zero_counts
         self.filterset = filterset
+        self.filter_dir = filter_dir
         self.transmission_effiency = Tensor(_epsilon).to(self.device)
         self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 
@@ -977,7 +985,7 @@ class Speculator():
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
              ), self.wave_obs) / self.ab_zero_counts
 
-        if noise == 'nsa':
+        if noise == 'nsa' or noise == 'gama':
             # Add noise based on NSA noise model.
             self._parse_nsa_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
@@ -997,6 +1005,11 @@ class Speculator():
             _noise = torch.randn_like(maggies) * maggies / SNR
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
+
+        elif noise == None:
+            pass
+        else:
+            raise ValueError('The noise model should be either nsa or gama or snr or None')
 
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(maggies)
@@ -1119,7 +1132,7 @@ class SuperSpeculator():
 
         self.bounds = np.array([self.prior[key] for key in self.params_name])
 
-    def _calc_transmission(self, filterset):
+    def _calc_transmission(self, filterset, filter_dir=None):
         import sys
         sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
 
@@ -1140,7 +1153,11 @@ class SuperSpeculator():
         # transmission efficiency
         _epsilon = np.zeros((len(filterset), len(x)))
         _zero_counts = np.zeros(len(filterset))
-        filters = observate.load_filters(filterset)
+        if filter_dir is None:
+            filters = observate.load_filters(filterset)
+        else:
+            filters = observate.load_filters(filterset, directory=filter_dir)
+
         for i in range(len(filterset)):
             _epsilon[i] = interp1d(filters[i].wavelength,
                                    filters[i].transmission,
@@ -1148,6 +1165,7 @@ class SuperSpeculator():
                                    fill_value=0)(x)
             _zero_counts[i] = filters[i].ab_zero_counts
         self.filterset = filterset
+        self.filter_dir = filter_dir
         self.transmission_effiency = Tensor(_epsilon).to(self.device)
         self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 
@@ -1249,9 +1267,8 @@ class SuperSpeculator():
 
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
             # 1e5 because the absolute mag is 10pc.
-            # dfactor = ((distances * 1e5)**2 / (1 + z))
             dfactor = ((distances * 1e5)**2 / (1 + z))
-            # dfactor = ((distances * 1e5)**2 * (1 + z))
+            # dfactor = ((distances * 1e5)**2)
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
             if islog:
@@ -1395,7 +1412,7 @@ class SuperSpeculator():
 
         maggies[maggies <= 0.] = 1e-15
 
-        if noise == 'nsa':
+        if noise == 'nsa' or noise == 'gama':
             # Add noise based on NSA noise model.
             self._parse_nsa_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
@@ -1416,6 +1433,11 @@ class SuperSpeculator():
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
 
+        elif noise == None:
+            pass
+        else:
+            raise ValueError('The noise model should be either nsa or gama or snr or None')
+            
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(maggies)
         mags = -2.5 * torch.log10(maggies)
