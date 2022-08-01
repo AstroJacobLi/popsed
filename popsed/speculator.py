@@ -985,7 +985,7 @@ class Speculator():
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
              ), self.wave_obs) / self.ab_zero_counts
 
-        if noise == 'nsa':
+        if noise == 'nsa' or noise == 'gama':
             # Add noise based on NSA noise model.
             self._parse_nsa_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
@@ -1005,6 +1005,11 @@ class Speculator():
             _noise = torch.randn_like(maggies) * maggies / SNR
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
+
+        elif noise == None:
+            pass
+        else:
+            raise ValueError('The noise model should be either nsa or gama or snr or None')
 
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(maggies)
@@ -1407,7 +1412,7 @@ class SuperSpeculator():
 
         maggies[maggies <= 0.] = 1e-15
 
-        if noise == 'nsa':
+        if noise == 'nsa' or noise == 'gama':
             # Add noise based on NSA noise model.
             self._parse_nsa_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
@@ -1428,6 +1433,11 @@ class SuperSpeculator():
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
 
+        elif noise == None:
+            pass
+        else:
+            raise ValueError('The noise model should be either nsa or gama or snr or None')
+            
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(maggies)
         mags = -2.5 * torch.log10(maggies)

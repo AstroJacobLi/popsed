@@ -790,7 +790,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.2, shuffle=True)
             # n_samples = len(X_train)
-            n_samples = 6000
+            n_samples = 8000
             # aggr_loss = 0
             # for i in range(3):
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
