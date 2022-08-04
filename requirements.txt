@@ -6,7 +6,9 @@ corner
 nflows
 sbi
 dill
-
+multiprocess
+fsps
+speclite
 
 https://github.com/aliutkus/torchinterp1d
 https://github.com/bd-j/sedpy
