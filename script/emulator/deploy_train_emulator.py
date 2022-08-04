@@ -6,7 +6,8 @@ import sys
 import fire
 
 
-def deploy_training_job(ibatch, name='NMF.emu', batch_size=256, file_low=0, file_high=15, rounds=6):
+def deploy_training_job(ibatch, name='NMF_ZH.emu', python_file='train_emulator_ZH.py',
+                        batch_size=256, file_low=0, file_high=15, rounds=6):
     ''' create slurm script and then submit 
     '''
     time = "24:00:00"
@@ -30,7 +31,7 @@ def deploy_training_job(ibatch, name='NMF.emu', batch_size=256, file_low=0, file
         "module purge",
         ". /home/jiaxuanl/Research/popsed/script/setup_env.sh",
         "",
-        f"python train_emulator.py --name={name} --i_bin={ibatch} --file_low={file_low} --file_high={file_high} --batch_size={batch_size} --rounds={rounds}",
+        f"python {python_file} --name={name} --i_bin={ibatch} --file_low={file_low} --file_high={file_high} --batch_size={batch_size} --rounds={rounds}",
         ""
         'now=$(date +"%T")',
         'echo "end time ... $now"',
@@ -66,3 +67,10 @@ if __name__ == '__main__':
 # python deploy_train_emulator.py --ibatch=2 --name='NMF.emu' --batch_size=512 --file_low=0 --file_high=10 --rounds=6
 # python deploy_train_emulator.py --ibatch=3 --name='NMF.emu' --batch_size=512 --file_low=0 --file_high=10 --rounds=6
 # python deploy_train_emulator.py --ibatch=4 --name='NMF.emu' --batch_size=512 --file_low=0 --file_high=10 --rounds=6
+
+# 22.08.03: retrain the emulator using NMF_ZH model
+# python deploy_train_emulator.py --ibatch=0 --name='NMF_ZH' --batch_size=512 --file_low=0 --file_high=10 --rounds=6
+# python deploy_train_emulator.py --ibatch=1 --name='NMF_ZH' --batch_size=512 --file_low=0 --file_high=10 --rounds=6
+# python deploy_train_emulator.py --ibatch=2 --name='NMF_ZH' --batch_size=512 --file_low=0 --file_high=10 --rounds=6
+# python deploy_train_emulator.py --ibatch=3 --name='NMF_ZH' --batch_size=512 --file_low=0 --file_high=10 --rounds=6
+# python deploy_train_emulator.py --ibatch=4 --name='NMF_ZH' --batch_size=512 --file_low=0 --file_high=10 --rounds=6
