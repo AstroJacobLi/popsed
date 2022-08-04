@@ -371,6 +371,7 @@ class Speculator():
                  n_parameters: int = None,
                  pca_filename: str = None,
                  hidden_size: list = [256, 256, 256, 256], 
+                 build_net: bool = True,
                  use_speclite=True):
         """
         Initialize the emulator.
@@ -399,15 +400,16 @@ class Speculator():
             self.pca = pickle.load(f)
         self.n_pca_components = len(self.pca.pca_transform_matrix)
         self.pca_scaler = StandardScaler(device=self.device)
+        
+        if build_net:
+            self.network = Network(
+                self.n_parameters, self.hidden_size, self.n_pca_components)
+            self.network.to(self.device)
 
-        self.network = Network(
-            self.n_parameters, self.hidden_size, self.n_pca_components)
-        self.network.to(self.device)
+            self.train_loss_history = []
+            self.val_loss_history = []
 
         self.use_speclite = use_speclite
-
-        self.train_loss_history = []
-        self.val_loss_history = []
 
         self._build_distance_interpolator()
         self._build_params_prior()
@@ -415,7 +417,8 @@ class Speculator():
     def _build_params_prior(self):
         """
         Hard bound prior for the input physical parameters.
-        E.g., redshift cannot be negative.
+        E.g., redshift cannot be negative. 
+        We replace zero with 1e-10 such that its log is not -inf.
 
         WARNING:
         / This prior should be consistant with the \
@@ -435,16 +438,19 @@ class Speculator():
                           'logm': [0, 16],
                           'redshift': [0, 10]}
         elif self._model == 'NMF':
-            self.prior = {'beta1_sfh': [0, 1], 'beta2_sfh': [0, 1],
-                          'beta3_sfh': [0, 1], 'beta4_sfh': [0, 1],
-                          'fburst': [0, 1.0], 'tburst': [1e-2, 13.27],
+            self.prior = {'kappa1_sfh': [1e-10, 1],
+                          'kappa2_sfh': [1e-10, 1],
+                          'kappa3_sfh': [1e-10, 1],
+                          # uniform from 0 to 1. Will be tranformed to betas. 1e-10 for numerical stability.
+                          'fburst': [1e-10, 1.0], 'tburst': [1e-2, 13.27],
                           'logzsol': [-2.6, 0.3],
-                          'dust1': [0, 3], 'dust2': [0, 3], 'dust_index': [-3, 1],
-                          'logm': [0, 16],
-                          'redshift': [0, 1.5]}
+                          'dust1': [1e-10, 3], 'dust2': [1e-10, 3], 'dust_index': [-3, 1],
+                          'logm': [1e-10, 16],
+                          'redshift': [1e-10, 1.5]
+                          }
         elif self._model == 'NMF_ZH':
-            self.prior = {'beta1_sfh': [0, 1], 'beta2_sfh': [0, 1],
-                          'beta3_sfh': [0, 1], 'beta4_sfh': [0, 1],
+            self.prior = {'kappa1_sfh': [0, 1], 'kappa2_sfh': [0, 1],
+                          'kappa3_sfh': [0, 1],
                           'fburst': [0, 1.0], 'tburst': [1e-2, 13.27],
                           'gamma1_zh': [4.5e-5, 4.5e-2],
                           'gamma2_zh': [4.5e-5, 4.5e-2],
@@ -467,7 +473,77 @@ class Speculator():
         self.z_grid = z_grid.to(self.device)
         self.dist_grid = dist_grid.to(self.device)
 
-    def _parse_nsa_noise_model(self, noise_model_dir):
+    def _calc_transmission(self, filterset, filter_dir=None):
+        """
+        Interploate and evaluate transmission curves at `self.wave_obs`.
+        Also calculate the zeropoint in each filter.
+        The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
+        And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
+
+        Details: there are to major packages to play with transmission curves of filters
+        and compute magnitudes. One is [`sedpy`](https://github.com/bd-j/sedpy), the other 
+        is [`speclite`](https://github.com/desihub/speclite). Interestingly, the default SDSS
+        transmission curves are different in the two packages. To keep consistent with ChangHoon Hahn's 
+        work, I stick to `speclite`. The convolution between the spectrum and the transmission curve is 
+        well explained in https://speclite.readthedocs.io/en/latest/api.html#convolutions. The zeropoint counts
+        here corresponds to the rate of incident photons per unit telescope area from a zero magnitude source.
+
+        Parameters
+        ----------
+        filterset: list of strings.
+            Names of filters, e.g., ['sdss2010-u', 'sdss2010-g', 'sdss2010-r', 'sdss2010-i', 'sdss2010-z'].
+            You can look up at available filters using `sedpy.observate.list_available_filters` 
+                or https://speclite.readthedocs.io/en/latest/filters.html.
+
+        filter_dir: str. The directory where the transmission curves are saved. 
+            Only works for `sedpy`. 
+        """
+        if hasattr(self, 'filterset') and self.filterset != filterset:
+            self.filterset = filterset
+        elif hasattr(self, 'filterset') and self.filterset == filterset:
+            pass
+        elif hasattr(self, 'filterset') is False:
+            self.filterset = filterset
+        
+        x = self.wave_obs.cpu().detach().numpy()
+
+        # transmission efficiency
+        _epsilon = np.zeros((len(filterset), len(x)))
+        _zero_counts = np.zeros(len(filterset))
+
+        if not self.use_speclite:
+            # we use sedpy to calculate the transmission efficiency
+            if filter_dir is None:
+                filters = observate.load_filters(filterset)
+            else:
+                filters = observate.load_filters(filterset, directory=filter_dir)
+
+            for i in range(len(filterset)):
+                _epsilon[i] = interp1d(filters[i].wavelength,
+                                    filters[i].transmission,
+                                    bounds_error=False,
+                                    fill_value=0)(x)
+                _zero_counts[i] = filters[i].ab_zero_counts
+            self.filterset = filterset
+            self.filter_dir = filter_dir
+            self.transmission_effiency = Tensor(_epsilon).to(self.device)
+            self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
+        
+        else:
+            # use speclite to calculate the transmission efficiency
+            import speclite.filters
+            import astropy.constants as const
+            filters = [speclite.filters.load_filter(filt) for filt in filterset]
+            for i in range(len(filters)):
+                _epsilon[i] = interp1d(filters[i].wavelength,
+                                    filters[i].response,
+                                    bounds_error=False,
+                                    fill_value=0)(x)
+                _zero_counts[i] = filters[i].ab_zeropoint.value * (const.h * const.c).cgs.value * 1e8
+            self.transmission_effiency = Tensor(_epsilon).to(self.device)
+            self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
+    
+    def _parse_noise_model(self, noise_model_dir):
         """
         Parse the noise model from the NSA.
         The noise model is generated in `popsed/notebook/forward_model/noise_model/``.
@@ -693,14 +769,15 @@ class Speculator():
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
 
-    def transform(self, spectra_restframe, z, islog=True):
+    def transform(self, spectra_restframe, z, islog=False):
         """
         Redshift the spectra. The input spectra are in restframe and have unit of Lsun/AA.
         The output spectra are in observed frame and have unit of erg/s/cm^2/AA 
         (i.e., already put the source at a redshift z).
+        **We have to redshift the spectra after combining them in restframe.**
 
-        Linear interpolation is used. Values outside
-        the interpolation range are linearly interpolated.
+        Linear interpolation is used. Values outside the interpolation range are 
+        linearly interpolated. However, Chang used trapz to interpolate. 
 
         Parameters
         ----------
@@ -715,7 +792,7 @@ class Speculator():
 
         Returns
         -------
-        spectra_transformed: torch.Tensor. Redshifted spectra. 
+        spectra_transformed: torch.Tensor. Redshifted spectra.
             The unit is in erg/s/cm^2/AA.
         """
         if not torch.is_tensor(z):
@@ -723,19 +800,18 @@ class Speculator():
         z = z.squeeze()
 
         if torch.any(z > 0):
-            wave_redshifted = (self.wave_rest.unsqueeze(1) * (1 + z)).T
+            wave_redshifted = (self.wave_obs.unsqueeze(1) * (1 + z)).T
 
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
             # 1e5 because the absolute mag is 10pc.
             dfactor = ((distances * 1e5)**2 * (1 + z))
-
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
             if islog:
                 spec = Interp1d()(wave_redshifted, spectra_restframe,
                                   self.wave_obs) - torch.log10(dfactor.T) + torch.log10(self.to_cgs_at_10pc)
             else:
-                spec = Interp1d()(wave_redshifted, spectra_restframe, self.wave_obs) / dfactor.T  * self.to_cgs_at_10pc
+                spec = Interp1d()(wave_redshifted, spectra_restframe, self.wave_obs) / dfactor.T * self.to_cgs_at_10pc
             return spec
         else:
             return spectra_restframe
@@ -857,43 +933,6 @@ class Speculator():
 
         return spec
 
-    def _calc_transmission(self, filterset, filter_dir=None):
-        import sys
-        sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
-
-        """
-        Interploate and evaluate transmission curves at `self.wave_obs`.
-        Also calculate the zeropoint in each filter.
-        The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
-        And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
-
-        Parameters
-        ----------
-        filterset: list of strings.
-            Names of filters, e.g., ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
-            You can look up at available filters using `sedpy.observate.list_available_filters`.
-        """
-        x = self.wave_obs.cpu().detach().numpy()
-
-        # transmission efficiency
-        _epsilon = np.zeros((len(filterset), len(x)))
-        _zero_counts = np.zeros(len(filterset))
-        if filter_dir is None:
-            filters = observate.load_filters(filterset)
-        else:
-            filters = observate.load_filters(filterset, directory=filter_dir)
-
-        for i in range(len(filterset)):
-            _epsilon[i] = interp1d(filters[i].wavelength,
-                                   filters[i].transmission,
-                                   bounds_error=False,
-                                   fill_value=0)(x)
-            _zero_counts[i] = filters[i].ab_zero_counts
-        self.filterset = filterset
-        self.filter_dir = filter_dir
-        self.transmission_effiency = Tensor(_epsilon).to(self.device)
-        self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
-
     def predict_mag(self, params, log_stellar_mass=None, redshift=None, **kwargs):
         """
         Predict the corresponding magnitude for given physical parameters.
@@ -984,7 +1023,7 @@ class Speculator():
 
         if noise == 'nsa' or noise == 'gama':
             # Add noise based on NSA noise model.
-            self._parse_nsa_noise_model(noise_model_dir)
+            self._parse_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
             _sigs_mags = torch.zeros_like(mags)
             _sig_flux = torch.zeros_like(mags)
@@ -1027,7 +1066,7 @@ class Speculator():
             pickle.dump(self, f)
 
 
-class SuperSpeculator():
+class SuperSpeculator(Speculator):
     """
     A class to combine different speculators trained for certain wavelengths.
     """
@@ -1079,160 +1118,6 @@ class SuperSpeculator():
         self._build_distance_interpolator()
         self._build_params_prior()
 
-    def _build_distance_interpolator(self):
-        """
-        Since the `astropy.cosmology` is not differentiable, we build a distance
-        interpolator which allows us to calculate the luminosity distance at
-        any given redshift in a differentiable way.
-
-        Here the cosmology is Planck15, NOT consistent with `prospector`.
-        """
-        from astropy.cosmology import Planck15 as cosmo
-        z_grid = torch.arange(0, 5, 0.001)
-        dist_grid = torch.Tensor(
-            cosmo.luminosity_distance(z_grid).value)  # Mpc
-        self.z_grid = z_grid.to(self.device)
-        self.dist_grid = dist_grid.to(self.device)
-
-    def _build_params_prior(self):
-        """
-        Hard bound prior for the input physical parameters.
-        E.g., redshift cannot be negative. 
-        We replace zero with 1e-10 such that its log is not -inf.
-
-        WARNING:
-        / This prior should be consistant with the \
-        \ prior used in training the emulator.     /
-        ----------------------------------------
-                \   ^__^
-                \  (oo)\_______
-                    (__)\       )\/\
-                        ||----w |
-                        ||     ||
-        """
-        if self._model == 'tau':
-            self.prior = {'tage': [0, 14],
-                          'logtau': [-4, 4],
-                          'logzsol': [-3, 2],
-                          'dust2': [0, 5],
-                          'logm': [0, 16],
-                          'redshift': [0, 10]}
-        elif self._model == 'NMF':
-            self.prior = {'kappa1_sfh': [1e-10, 1],
-                          'kappa2_sfh': [1e-10, 1],
-                          'kappa3_sfh': [1e-10, 1],
-                          # uniform from 0 to 1. Will be tranformed to betas. 1e-10 for numerical stability.
-                          'fburst': [1e-10, 1.0], 'tburst': [1e-2, 13.27],
-                          'logzsol': [-2.6, 0.3],
-                          'dust1': [1e-10, 3], 'dust2': [1e-10, 3], 'dust_index': [-3, 1],
-                          'logm': [1e-10, 16],
-                          'redshift': [1e-10, 1.5]
-                          }
-        elif self._model == 'NMF_ZH':
-            self.prior = {'kappa1_sfh': [0, 1], 'kappa2_sfh': [0, 1],
-                          'kappa3_sfh': [0, 1],
-                          'fburst': [0, 1.0], 'tburst': [1e-2, 13.27],
-                          'gamma1_zh': [4.5e-5, 4.5e-2],
-                          'gamma2_zh': [4.5e-5, 4.5e-2],
-                          'dust1': [0, 3], 'dust2': [0, 3], 'dust_index': [-3, 1],
-                          'logm': [0, 16],
-                          'redshift': [0, 1.5]}
-
-        self.bounds = np.array([self.prior[key] for key in self.params_name])
-
-    def _calc_transmission(self, filterset, filter_dir=None):
-        """
-        Interploate and evaluate transmission curves at `self.wave_obs`.
-        Also calculate the zeropoint in each filter.
-        The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
-        And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
-
-        Details: there are to major packages to play with transmission curves of filters
-        and compute magnitudes. One is [`sedpy`](https://github.com/bd-j/sedpy), the other 
-        is [`speclite`](https://github.com/desihub/speclite). Interestingly, the default SDSS
-        transmission curves are different in the two packages. To keep consistent with ChangHoon Hahn's 
-        work, I stick to `speclite`. The convolution between the spectrum and the transmission curve is 
-        well explained in https://speclite.readthedocs.io/en/latest/api.html#convolutions. The zeropoint counts
-        here corresponds to the rate of incident photons per unit telescope area from a zero magnitude source.
-
-        Parameters
-        ----------
-        filterset: list of strings.
-            Names of filters, e.g., ['sdss2010-u', 'sdss2010-g', 'sdss2010-r', 'sdss2010-i', 'sdss2010-z'].
-            You can look up at available filters using `sedpy.observate.list_available_filters` 
-                or https://speclite.readthedocs.io/en/latest/filters.html.
-
-        filter_dir: str. The directory where the transmission curves are saved. 
-            Only works for `sedpy`. 
-        """
-        if hasattr(self, 'filterset') and self.filterset != filterset:
-            self.filterset = filterset
-        elif hasattr(self, 'filterset') and self.filterset == filterset:
-            pass
-        elif hasattr(self, 'filterset') is False:
-            self.filterset = filterset
-        
-        x = self.wave_obs.cpu().detach().numpy()
-
-        # transmission efficiency
-        _epsilon = np.zeros((len(filterset), len(x)))
-        _zero_counts = np.zeros(len(filterset))
-
-        if not self.use_speclite:
-            # we use sedpy to calculate the transmission efficiency
-            if filter_dir is None:
-                filters = observate.load_filters(filterset)
-            else:
-                filters = observate.load_filters(filterset, directory=filter_dir)
-
-            for i in range(len(filterset)):
-                _epsilon[i] = interp1d(filters[i].wavelength,
-                                    filters[i].transmission,
-                                    bounds_error=False,
-                                    fill_value=0)(x)
-                _zero_counts[i] = filters[i].ab_zero_counts
-            self.filterset = filterset
-            self.filter_dir = filter_dir
-            self.transmission_effiency = Tensor(_epsilon).to(self.device)
-            self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
-        
-        else:
-            # use speclite to calculate the transmission efficiency
-            import speclite.filters
-            import astropy.constants as const
-            filters = [speclite.filters.load_filter(filt) for filt in filterset]
-            for i in range(len(filters)):
-                _epsilon[i] = interp1d(filters[i].wavelength,
-                                    filters[i].response,
-                                    bounds_error=False,
-                                    fill_value=0)(x)
-                _zero_counts[i] = filters[i].ab_zeropoint.value * (const.h * const.c).cgs.value * 1e8
-            self.transmission_effiency = Tensor(_epsilon).to(self.device)
-            self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
-
-    def _parse_nsa_noise_model(self, noise_model_dir):
-        """
-        Parse the noise model from the NSA.
-        The noise model is generated in `popsed/notebook/forward_model/noise_model/``.
-
-        Parameters
-        ----------
-        noise_model_dir: str. The directory of the noise model file.
-        """
-        meds_sigs, stds_sigs = np.load(noise_model_dir, allow_pickle=True)
-        # meds_sigs is the median of noise, stds_sigs is the std of noise. All in magnitude.
-
-        n_filters = len(meds_sigs)
-        mag_grid = torch.arange(10, 30, 1)
-        med_sig_grid = torch.vstack(
-            [Tensor(meds_sigs[i](mag_grid)) for i in range(n_filters)])
-        std_sig_grid = torch.vstack(
-            [Tensor(stds_sigs[i](mag_grid)) for i in range(n_filters)])
-
-        self.mag_grid = mag_grid.to(self.device)
-        self.med_sig_grid = med_sig_grid.T.to(self.device)
-        self.std_sig_grid = std_sig_grid.T.to(self.device)
-
     def _predict_spec_restframe(self, params):
         """
         Predict the corresponding spectra (in linear scale) for given physical parameters.
@@ -1262,53 +1147,6 @@ class SuperSpeculator():
         # The output spectra is restframe in unit of Lsun/AA.
         return torch.hstack(
             [_speculator._predict_spec_with_mass_restframe(params) for _speculator in self.speculators])
-
-    def transform(self, spectra_restframe, z, islog=False):
-        """
-        Redshift the spectra. The input spectra are in restframe and have unit of Lsun/AA.
-        The output spectra are in observed frame and have unit of erg/s/cm^2/AA 
-        (i.e., already put the source at a redshift z).
-        **We have to redshift the spectra after combining them in restframe.**
-
-        Linear interpolation is used. Values outside the interpolation range are 
-        linearly interpolated. However, Chang used trapz to interpolate. 
-
-        Parameters
-        ----------
-        spectra_restframe: torch.Tensor.
-            Restframe spectra in **linear** flux, shape = (n_wavelength, n_samples).
-            Unit should be in Lsun/AA.
-        z: torch.Tensor or np.ndarray.
-            Redshifts of each spectra, shape = (n_samples,).
-        islog: bool.
-            Whether the input spectra is in log10-flux.
-            If True, the output spectra is also in log10-flux.
-
-        Returns
-        -------
-        spectra_transformed: torch.Tensor. Redshifted spectra.
-            The unit is in erg/s/cm^2/AA.
-        """
-        if not torch.is_tensor(z):
-            z = torch.tensor(z, dtype=torch.float).to(self.device)
-        z = z.squeeze()
-
-        if torch.any(z > 0):
-            wave_redshifted = (self.wave_obs.unsqueeze(1) * (1 + z)).T
-
-            distances = Interp1d()(self.z_grid, self.dist_grid, z)
-            # 1e5 because the absolute mag is 10pc.
-            dfactor = ((distances * 1e5)**2 * (1 + z))
-            # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
-            # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
-            if islog:
-                spec = Interp1d()(wave_redshifted, spectra_restframe,
-                                  self.wave_obs) - torch.log10(dfactor.T) + torch.log10(self.to_cgs_at_10pc)
-            else:
-                spec = Interp1d()(wave_redshifted, spectra_restframe, self.wave_obs) / dfactor.T * self.to_cgs_at_10pc
-            return spec
-        else:
-            return spectra_restframe
 
     def _predict_spec_with_mass_redshift(self, params,
                                          external_redshift=None):
@@ -1451,7 +1289,7 @@ class SuperSpeculator():
 
         if noise == 'nsa' or noise == 'gama':
             # Add noise based on NSA noise model.
-            self._parse_nsa_noise_model(noise_model_dir)
+            self._parse_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
             _sigs_mags = torch.zeros_like(mags)
             _sig_flux = torch.zeros_like(mags)
