@@ -41,7 +41,7 @@ exclude_patterns = []
 # copies of each notebook, and myst will choose which to convert based on
 # the order in the source_suffix list. Notebooks which are not executed have
 # outputs stored in ipynb but not in md, so we must convert the ipynb.
-source_suffix = ['.rst', '.ipynb']  # , '.md'
+source_suffix = ['.rst', '.ipynb', '.md']
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = None
@@ -79,7 +79,21 @@ html_static_path = ['_static']
 
 # -- Options for myst ----------------------------------------------
 myst_heading_anchors = 3  # auto-generate 3 levels of heading anchors
-myst_enable_extensions = ['dollarmath']
+myst_enable_extensions = [
+    "amsmath",
+    "colon_fence",
+    "deflist",
+    "dollarmath",
+    "fieldlist",
+    "html_admonition",
+    "html_image",
+    "linkify",
+    "replacements",
+    "smartquotes",
+    "strikethrough",
+    "substitution",
+    "tasklist",
+]
 nb_execution_mode = "force"
 nb_execution_allow_errors = False
 nb_merge_streams = True

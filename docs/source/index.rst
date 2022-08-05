@@ -9,8 +9,10 @@ Welcome to popsed's documentation!
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
-   
+
    api
+
+   math.md
 
 
 
