@@ -58,6 +58,7 @@ if __name__ == '__main__':
 
 # 22.08.05
 # python deploy_nde_gama.py --output_dir='./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3/' --seed_low=0 --seed_high=5 --num_bins=50 --num_transforms=10 --hidden_features=50
+# python deploy_nde_gama.py --output_dir='./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3/' --seed_low=5 --seed_high=6 --num_bins=50 --num_transforms=10 --hidden_features=50
 # python deploy_nde_gama.py --output_dir='./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3_20trans/' --seed_low=0 --seed_high=5 --num_bins=50 --num_transforms=20 --hidden_features=100
 
 
