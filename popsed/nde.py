@@ -768,7 +768,6 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         sinkhorn_kwargs: dict, the kwargs for the sinkhorn loss. 
             See https://www.kernel-operations.io/geomloss/api/pytorch-api.html
         scheduler: torch.optim.lr_scheduler, the learning rate scheduler.
-        only_penalty: bool, whether to only use the penalty term as loss.
         regularize: bool. Whether the SED params are transformed using log10 and sigmoid.
         detect_anomaly: bool, whether to detect the anomaly.
         """

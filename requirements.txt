@@ -12,3 +12,7 @@ speclite
 
 https://github.com/aliutkus/torchinterp1d
 https://github.com/bd-j/sedpy
+
+pip3 install sphinx-autodoc-typehints sphinx_rtd_theme
+pip install myst-nb sphinx_remove_toctrees sphinx_copybutton
+pip install sphinx-book-theme
