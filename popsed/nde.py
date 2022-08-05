@@ -554,7 +554,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         """
         from torch.utils.data import DataLoader
         super().build(batch_theta, optimizer, lr, **kwargs)
-        
+
         if not torch.is_tensor(batch_X):
             batch_X = torch.tensor(batch_X, device='cpu')
 
@@ -697,36 +697,36 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         #                     powers)
         # # print('Number of inf:', torch.isinf(penalty).sum())
         # penalty = penalty[~torch.isinf(penalty)].nanmean()
-        
-        
+
         Y = speculator._predict_mag_with_mass_redshift(
-                sample, filterset=self.filterset,
-                noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+            sample, filterset=self.filterset,
+            noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
         if self.z_score:
             Y = self.scaler.transform(
-                mags,
+                Y,
                 device=self.device
             )
         bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
             :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
         bad_mask |= (torch.isnan(Y).any(axis=1) |
-                        torch.isinf(Y).any(axis=1))
+                     torch.isinf(Y).any(axis=1))
         Y = Y[~bad_mask]
         # print('Bad mask num', bad_mask.sum())
         # penalty = torch.sum(Y[:, 2] > (19.65 - self.scaler.mean[2]) / self.scaler.std[2]) / len(Y) * 10
         penalty = torch.sum(Y[:, 2] > 19.65) / len(Y) * 10
-        # dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
-        # data_loss = 0.
-        # for x in dataloader:
-        #     data_loss += loss_fn(Y, x.to(self.device))
-        
-        # loss = data_loss / len(dataloader)  # + penalty
-        
-        loss = loss_fn(Y, X)
+
+        dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
+        data_loss = 0.
+        for x in dataloader:
+            data_loss += loss_fn(Y, x.to(self.device))
+
+        loss = data_loss / len(dataloader)  # + penalty
+        # loss = loss_fn(Y, X)
 
         if add_penalty:
-            # loss += loss_fn((1 * (X[:100, 2:3].clone() - 19.65)), (1 * (Y[:100, 2:3].clone() - 19.65))) 
-            loss += loss_fn(10**(1 * (X[:, 2:3].clone() - 19.65)), 10**(1 * (Y[:, 2:3].clone() - 19.65)))
+            # loss += loss_fn((1 * (X[:100, 2:3].clone() - 19.65)), (1 * (Y[:100, 2:3].clone() - 19.65)))
+            loss += loss_fn(10**(1 * (X[:, 2:3].clone() - 19.65)),
+                            10**(1 * (Y[:, 2:3].clone() - 19.65)))
 
         sample = None
         x = None
@@ -739,7 +739,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         # Y.to('cpu')
         # loss_fn(X, Y)# penalty +
 
-        return loss, penalty #torch.zeros_like(loss)  # penalty
+        return loss, penalty  # torch.zeros_like(loss)  # penalty
 
     def train(self,
               n_epochs: int = 100,
@@ -790,7 +790,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.2, shuffle=True)
             # n_samples = len(X_train)
-            n_samples = 8000
+            n_samples = 10000
             # aggr_loss = 0
             # for i in range(3):
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
