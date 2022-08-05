@@ -119,7 +119,7 @@ class Model(object):
             w_z = wave_rest * (1. + _zred)
             d_lum = self._d_lum_z_interp(_zred)
             # flux_z = lum_ssp * utils.Lsun() / (4. * np.pi * d_lum**2) / (1. + _zred) * 1e17 # 10^-17 ergs/s/cm^2/Ang
-            flux_z = lum_ssp * 3.846e50 / \
+            flux_z = lum_ssp * 3.846e33 / \
                 (4. * np.pi * d_lum**2) / (1. + _zred)  # 10^-17 ergs/s/cm^2/Ang
 
             # apply velocity dispersion
@@ -174,6 +174,11 @@ class Model(object):
             outspec = np.array(outspec)
             if filters is not None:
                 maggies = np.array(maggies)
+
+        from matplotlib import pyplot as plt
+        plt.plot(w_z, flux_z)
+        # plt.plot(outwave, outspec)
+        plt.xlim(9900, 15200)
 
         if filters is None:
             return outwave, outspec
@@ -270,7 +275,6 @@ class NMF(Model):
     -----
     * only supports 4 component SFH with or without burst and 2 component ZH 
     * only supports Calzetti+(2000) attenuation curve and Chabrier IMF. 
-    * 2022-03-13: Emulator is not trained yet.
     '''
 
     def __init__(self, burst=True, emulator=False, cosmo=None, peraa=False):
@@ -1056,11 +1060,9 @@ class NMF(Model):
         return None
 
 
-
 class NMF_ZH(Model):
     '''
-    Modified from provabgs.models.NMF. Replace metallicity history with
-    a single metallicity.
+    Modified from provabgs.models.NMF. With metallicity history. 
 
     SPS model with non-parametric star formation history and flexible dust 
     attenuation model. The SFH is based on non-negative
@@ -1169,12 +1171,9 @@ class NMF_ZH(Model):
             _burst=False)
         # Replace whatever stellar mass with 1 Msun
         # 0.0 stands for logmstar = 0.0, i.e., normalized to 1 M_sun
-
-        '''
         # NMF ZH at lookback time bins
         _, zh = self.ZH(tt, tage=tage)
-        # I don't use ZH. I use log_Z directly.
-        '''
+
         tages = 0.5 * (tlb_edges[1:] + tlb_edges[:-1])  # ages of SSP
         dt = np.diff(tlb_edges)  # bin widths
 
@@ -1184,7 +1183,8 @@ class NMF_ZH(Model):
             if m == 0 and i != 0:
                 continue
 
-            self._ssp.params['logzsol'] = theta['logzsol']  # log(Z/Zsun)
+            self._ssp.params['logzsol'] = np.log10(
+                zh[i] / 0.0190)  # log(Z/Zsun)
             self._ssp.params['dust1'] = theta['dust1']
             self._ssp.params['dust2'] = theta['dust2']
             self._ssp.params['dust_index'] = theta['dust_index']
@@ -1236,7 +1236,6 @@ class NMF_ZH(Model):
         assert tburst > 1e-2, "burst currently only supported for tburst > 1e-2 Gyr = 10 Myr"
 
         # get metallicity at tburst
-        '''
         tt_zh = np.array([theta['gamma1_zh'], theta['gamma2_zh']])
         zburst = np.sum(np.array([tt_zh[i] * self._zh_basis[i](tburst)
                                   for i in range(self._N_nmf_zh)])).clip(self._Z_min, self._Z_max)
@@ -1244,10 +1243,10 @@ class NMF_ZH(Model):
             print('zburst=%e' % zburst)
             print('dust2=%f' % dust2)
             print('dust_index=%f' % dust_index)
-        '''
+
         # luminosity of SSP at tburst
         # np.log10(zburst/0.0190)  # log(Z/Zsun)
-        self._ssp.params['logzsol'] = theta['logzsol']
+        self._ssp.params['logzsol'] = np.log10(zburst / 0.0190)  # log(Z/Zsun)
         self._ssp.params['dust1'] = 0.  # no birth cloud attenuation for tage > 1e-2 Gyr
         self._ssp.params['dust2'] = theta['dust2']
         self._ssp.params['dust_index'] = theta['dust_index']

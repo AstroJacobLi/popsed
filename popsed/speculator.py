@@ -2,6 +2,7 @@
 Modified Speculator, based on https://github.com/justinalsing/speculator/blob/master/speculator/speculator.py
 '''
 
+from dis import dis
 import numpy as np
 import pickle
 from sklearn.decomposition import IncrementalPCA
@@ -369,7 +370,9 @@ class Speculator():
     def __init__(self, name='NMF', model='NMF',
                  n_parameters: int = None,
                  pca_filename: str = None,
-                 hidden_size: list = [256, 256, 256, 256]):
+                 hidden_size: list = [256, 256, 256, 256],
+                 build_net: bool = True,
+                 use_speclite=True):
         """
         Initialize the emulator.
 
@@ -384,7 +387,7 @@ class Speculator():
         n_parameters: int. Number of parameters to be used in the emulator.
         pca_filename: int. Filename of the PCA object to be used.
         hidden_size: list. List of hidden layer sizes, e.g., [100, 100, 100].
-
+        use_speclite: bool. Whether to use `speclite` to compute the magnitudes.
         """
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu')  # default is GPU
@@ -398,12 +401,15 @@ class Speculator():
         self.n_pca_components = len(self.pca.pca_transform_matrix)
         self.pca_scaler = StandardScaler(device=self.device)
 
-        self.network = Network(
-            self.n_parameters, self.hidden_size, self.n_pca_components)
-        self.network.to(self.device)
+        if build_net:
+            self.network = Network(
+                self.n_parameters, self.hidden_size, self.n_pca_components)
+            self.network.to(self.device)
 
-        self.train_loss_history = []
-        self.val_loss_history = []
+            self.train_loss_history = []
+            self.val_loss_history = []
+
+        self.use_speclite = use_speclite
 
         self._build_distance_interpolator()
         self._build_params_prior()
@@ -411,7 +417,8 @@ class Speculator():
     def _build_params_prior(self):
         """
         Hard bound prior for the input physical parameters.
-        E.g., redshift cannot be negative.
+        E.g., redshift cannot be negative. 
+        We replace zero with 1e-10 such that its log is not -inf.
 
         WARNING:
         / This prior should be consistant with the \
@@ -431,10 +438,22 @@ class Speculator():
                           'logm': [0, 16],
                           'redshift': [0, 10]}
         elif self._model == 'NMF':
-            self.prior = {'beta1_sfh': [0, 1], 'beta2_sfh': [0, 1],
-                          'beta3_sfh': [0, 1], 'beta4_sfh': [0, 1],
-                          'fburst': [0, 1.0], 'tburst': [1e-2, 13.27],
+            self.prior = {'kappa1_sfh': [1e-10, 1],
+                          'kappa2_sfh': [1e-10, 1],
+                          'kappa3_sfh': [1e-10, 1],
+                          # uniform from 0 to 1. Will be tranformed to betas. 1e-10 for numerical stability.
+                          'fburst': [1e-10, 1.0], 'tburst': [1e-2, 13.27],
                           'logzsol': [-2.6, 0.3],
+                          'dust1': [1e-10, 3], 'dust2': [1e-10, 3], 'dust_index': [-3, 1],
+                          'logm': [1e-10, 16],
+                          'redshift': [1e-10, 1.5]
+                          }
+        elif self._model == 'NMF_ZH':
+            self.prior = {'kappa1_sfh': [0, 1], 'kappa2_sfh': [0, 1],
+                          'kappa3_sfh': [0, 1],
+                          'fburst': [0, 1.0], 'tburst': [1e-2, 13.27],
+                          'gamma1_zh': [4.5e-5, 4.5e-2],
+                          'gamma2_zh': [4.5e-5, 4.5e-2],
                           'dust1': [0, 3], 'dust2': [0, 3], 'dust_index': [-3, 1],
                           'logm': [0, 16],
                           'redshift': [0, 1.5]}
@@ -454,7 +473,80 @@ class Speculator():
         self.z_grid = z_grid.to(self.device)
         self.dist_grid = dist_grid.to(self.device)
 
-    def _parse_nsa_noise_model(self, noise_model_dir):
+    def _calc_transmission(self, filterset, filter_dir=None):
+        """
+        Interploate and evaluate transmission curves at `self.wave_obs`.
+        Also calculate the zeropoint in each filter.
+        The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
+        And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
+
+        Details: there are to major packages to play with transmission curves of filters
+        and compute magnitudes. One is [`sedpy`](https://github.com/bd-j/sedpy), the other 
+        is [`speclite`](https://github.com/desihub/speclite). Interestingly, the default SDSS
+        transmission curves are different in the two packages. To keep consistent with ChangHoon Hahn's 
+        work, I stick to `speclite`. The convolution between the spectrum and the transmission curve is 
+        well explained in https://speclite.readthedocs.io/en/latest/api.html#convolutions. The zeropoint counts
+        here corresponds to the rate of incident photons per unit telescope area from a zero magnitude source.
+
+        Parameters
+        ----------
+        filterset: list of strings.
+            Names of filters, e.g., ['sdss2010-u', 'sdss2010-g', 'sdss2010-r', 'sdss2010-i', 'sdss2010-z'].
+            You can look up at available filters using `sedpy.observate.list_available_filters` 
+                or https://speclite.readthedocs.io/en/latest/filters.html.
+
+        filter_dir: str. The directory where the transmission curves are saved. 
+            Only works for `sedpy`. 
+        """
+        if hasattr(self, 'filterset') and self.filterset != filterset:
+            self.filterset = filterset
+        elif hasattr(self, 'filterset') and self.filterset == filterset:
+            pass
+        elif hasattr(self, 'filterset') is False:
+            self.filterset = filterset
+
+        x = self.wave_obs.cpu().detach().numpy()
+
+        # transmission efficiency
+        _epsilon = np.zeros((len(filterset), len(x)))
+        _zero_counts = np.zeros(len(filterset))
+
+        if not self.use_speclite:
+            # we use sedpy to calculate the transmission efficiency
+            if filter_dir is None:
+                filters = observate.load_filters(filterset)
+            else:
+                filters = observate.load_filters(
+                    filterset, directory=filter_dir)
+
+            for i in range(len(filterset)):
+                _epsilon[i] = interp1d(filters[i].wavelength,
+                                       filters[i].transmission,
+                                       bounds_error=False,
+                                       fill_value=0)(x)
+                _zero_counts[i] = filters[i].ab_zero_counts
+            self.filterset = filterset
+            self.filter_dir = filter_dir
+            self.transmission_effiency = Tensor(_epsilon).to(self.device)
+            self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
+
+        else:
+            # use speclite to calculate the transmission efficiency
+            import speclite.filters
+            import astropy.constants as const
+            filters = [speclite.filters.load_filter(
+                filt) for filt in filterset]
+            for i in range(len(filters)):
+                _epsilon[i] = interp1d(filters[i].wavelength,
+                                       filters[i].response,
+                                       bounds_error=False,
+                                       fill_value=0)(x)
+                _zero_counts[i] = filters[i].ab_zeropoint.value * \
+                    (const.h * const.c).cgs.value * 1e8
+            self.transmission_effiency = Tensor(_epsilon).to(self.device)
+            self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
+
+    def _parse_noise_model(self, noise_model_dir):
         """
         Parse the noise model from the NSA.
         The noise model is generated in `popsed/notebook/forward_model/noise_model/``.
@@ -680,16 +772,21 @@ class Speculator():
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
 
-    def transform(self, spectra_restframe, z, islog=True):
+    def transform(self, spectra_restframe, z, islog=False):
         """
-        Redshift spectra.
-        Linear interpolation is used. Values outside
-        the interpolation range are linearly interpolated.
+        Redshift the spectra. The input spectra are in restframe and have unit of Lsun/AA.
+        The output spectra are in observed frame and have unit of erg/s/cm^2/AA 
+        (i.e., already put the source at a redshift z).
+        **We have to redshift the spectra after combining them in restframe.**
+
+        Linear interpolation is used. Values outside the interpolation range are 
+        linearly interpolated. However, Chang used trapz to interpolate. 
 
         Parameters
         ----------
         spectra_restframe: torch.Tensor.
             Restframe spectra in **linear** flux, shape = (n_wavelength, n_samples).
+            Unit should be in Lsun/AA.
         z: torch.Tensor or np.ndarray.
             Redshifts of each spectra, shape = (n_samples,).
         islog: bool.
@@ -699,26 +796,26 @@ class Speculator():
         Returns
         -------
         spectra_transformed: torch.Tensor. Redshifted spectra.
+            The unit is in erg/s/cm^2/AA.
         """
         if not torch.is_tensor(z):
             z = torch.tensor(z, dtype=torch.float).to(self.device)
         z = z.squeeze()
 
         if torch.any(z > 0):
-            wave_redshifted = (self.wave_rest.unsqueeze(1) * (1 + z)).T
+            wave_redshifted = (self.wave_obs.unsqueeze(1) * (1 + z)).T
 
             distances = Interp1d()(self.z_grid, self.dist_grid, z)
             # 1e5 because the absolute mag is 10pc.
-            dfactor = ((distances * 1e5)**2 / (1 + z))
-            # dfactor = ((distances * 1e5)**2)
-
+            dfactor = ((distances * 1e5)**2 * (1 + z))
             # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
             # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
             if islog:
                 spec = Interp1d()(wave_redshifted, spectra_restframe,
-                                  self.wave_obs) - torch.log10(dfactor.T)
+                                  self.wave_obs) - torch.log10(dfactor.T) + torch.log10(self.to_cgs_at_10pc)
             else:
-                spec = Interp1d()(wave_redshifted, spectra_restframe, self.wave_obs) / dfactor.T
+                spec = Interp1d()(wave_redshifted, spectra_restframe, self.wave_obs) / \
+                    dfactor.T * self.to_cgs_at_10pc
             return spec
         else:
             return spectra_restframe
@@ -770,9 +867,49 @@ class Speculator():
             redshift = torch.zeros_like(params[:, 0:1])
         return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device))
 
+    def _predict_spec_with_mass_restframe(self, params):
+        """
+        Predict the corresponding spectra (in linear scale) for given physical parameters.
+        Not redshifting the spectra. Notice that the `dfactor` is involved only in `self.transform`. 
+
+        If the model is NMF, the SPS parameters contain redshift as a proxy for age.
+        Therefore, the input params is like [SPS params (including redshift), stellar mass].
+        The output spectra is in unit of Lsun/AA. **This is peraa, not perHz.**
+
+        Parameters
+        ----------
+        params: torch.Tensor.
+            SPS physical parameters, including stellar mass. shape = (n_samples, n_params).
+            params[:, :-1] are the SPS physical parameters NOT including stellar mass and redshift.
+                If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
+            params[:, -1:] is the log10 stellar mass.
+
+        Returns
+        -------
+        spec: torch.Tensor.
+            Predicted spectra in linear scales, shape = (n_wavelength, n_samples).
+            **Notice** that if `self._model == "NMF"`, the output spectra is in unit of Lsun/AA.
+        """
+        pca_coeff = self.predict(params[:, :-1])  # Assuming 1 M_sun.
+        log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
+            pca_coeff, device=self.device), device=self.device) + params[:, -1:]  # added log_stellar_mass
+
+        thresh = 5
+        # if torch.any(log_spec > thresh):
+        #     print(f'# of log spec > {thresh} params:',
+        #           (log_spec > thresh).any(dim=1).sum())
+        log_spec[torch.any(log_spec > thresh, dim=1)] = -30
+        # make the spectrum in unit of Lsun/AA
+        spec = 10**log_spec * self.lightspeed / self.wave_obs**2
+        return spec
+
     def _predict_spec_with_mass_redshift(self, params):
         """
         Predict the corresponding spectra (in linear scale) for given physical parameters.
+        If the model is NMF, the SPS parameters contain redshift as a proxy for age.
+        Therefore, the input params is like [SPS params (including redshift), stellar mass, redshift].
+        The output spectra is in unit of erg/s/cm^2/AA at your given redshift distance. 
+        **This is peraa, not perHz.**
 
         Parameters
         ----------
@@ -787,69 +924,12 @@ class Speculator():
         -------
         spec: torch.Tensor.
             Predicted spectra in linear scales, shape = (n_wavelength, n_samples).
-            **Notice** that if `self._model == "NMF"`, the output spectra is in unit of Lsun/Hz.
-            To convert from L_sun/Hz to L_sun/AA, multiply L_sun/Hz by lightspeed / wave**2.
-            To convert L_sun/Hz to erg/s/cm^2/AA at 10 pc, multiply by `to_cgs_at_10pc`.
+            The unit is erg/s/cm^2/AA at your given redshift distance.
         """
-        pca_coeff = self.predict(params[:, :-2])  # Assuming 1 M_sun.
-        log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
-            pca_coeff, device=self.device), device=self.device) + params[:, -2:-1]  # added log_stellar_mass
-
-        thresh = 5
-        # if torch.any(log_spec > thresh):
-        # print(f'# of log spec > {thresh} params:',
-        #       (log_spec > thresh).any(dim=1).sum())
-        log_spec[torch.any(log_spec > thresh, dim=1)] = -30
-        # log_spec[torch.any(log_spec > 20, dim=1)] = -12
-        # such that interpolation will not do linear extrapolation.
-        # spec[:, 0] = 0.0  # torch.nan
-        # spec = self.transform(10**log_spec, params[:, -1:], islog=False)
-        spec = 10**self.transform(log_spec, params[:, -1], islog=True)
-        spec = 10**log_spec
-        # if torch.any(torch.isnan(spec)):
-        #     print(params[torch.isnan(spec).any(dim=1)])
-        # print('Nan in spec:', torch.isnan(spec).sum())
-        # print('Correpsonding spec:', log_spec[torch.isnan(spec).any(dim=1)])
-        # I don't directly ban unphysical spectra here. But I add penalty term to the loss function.
-        # bad_mask = torch.stack([((params < self.bounds[i][0]) | (params > self.bounds[i][1]))[
-        #     :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
-        # bad_val = 1e-12  # -torch.inf
-        # spec[bad_mask] = bad_val
-        # print('Bad mask:', bad_mask.sum())
-        # spec[(params[:, -1:] < 0.0).squeeze(1)] = bad_val
-        # spec[(params[:, -2:-1] < 0.0).squeeze(1)] = bad_val
-        return spec
-
-    def _predict_spec_with_mass_restframe(self, params):
-        """
-        Predict the corresponding spectra (in linear scale) for given physical parameters.
-
-        Parameters
-        ----------
-        params: torch.Tensor.
-            SPS physical parameters, including stellar mass. shape = (n_samples, n_params).
-            params[:, :-1] are the SPS physical parameters NOT including stellar mass and redshift.
-                If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
-            params[:, -1:] is the log10 stellar mass.
-
-        Returns
-        -------
-        spec: torch.Tensor.
-            Predicted spectra in linear scales, shape = (n_wavelength, n_samples).
-            **Notice** that if `self._model == "NMF"`, the output spectra is in unit of Lsun/Hz.
-            To convert from L_sun/Hz to L_sun/AA, multiply L_sun/Hz by lightspeed / wave**2.
-            To convert L_sun/Hz to erg/s/cm^2/AA at 10 pc, multiply by `to_cgs_at_10pc`.
-        """
-        pca_coeff = self.predict(params[:, :-1])  # Assuming 1 M_sun.
-        log_spec = self.pca.logspec_scaler.inverse_transform(self.pca.inverse_transform(
-            pca_coeff, device=self.device), device=self.device) + params[:, -1:]  # added log_stellar_mass
-
-        thresh = 5
-        # if torch.any(log_spec > thresh):
-        #     print(f'# of log spec > {thresh} params:',
-        #           (log_spec > thresh).any(dim=1).sum())
-        log_spec[torch.any(log_spec > thresh, dim=1)] = -30
-        spec = 10**log_spec
+        spec = self._predict_spec_with_mass_restframe(
+            params[:, :-1])  # restframe
+        # this will put the spectrum at a redshift of params[:, -1]
+        spec = self.transform(spec, params[:, -1], islog=False)
         return spec
 
     def predict_spec_from_norm_pca(self, y):
@@ -859,43 +939,6 @@ class Speculator():
             pca_coeff, device=self.device), device=self.device)
 
         return spec
-
-    def _calc_transmission(self, filterset, filter_dir=None):
-        import sys
-        sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
-
-        """
-        Interploate and evaluate transmission curves at `self.wave_obs`.
-        Also calculate the zeropoint in each filter.
-        The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
-        And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
-
-        Parameters
-        ----------
-        filterset: list of strings.
-            Names of filters, e.g., ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
-            You can look up at available filters using `sedpy.observate.list_available_filters`.
-        """
-        x = self.wave_obs.cpu().detach().numpy()
-
-        # transmission efficiency
-        _epsilon = np.zeros((len(filterset), len(x)))
-        _zero_counts = np.zeros(len(filterset))
-        if filter_dir is None:
-            filters = observate.load_filters(filterset)
-        else:
-            filters = observate.load_filters(filterset, directory=filter_dir)
-
-        for i in range(len(filterset)):
-            _epsilon[i] = interp1d(filters[i].wavelength,
-                                   filters[i].transmission,
-                                   bounds_error=False,
-                                   fill_value=0)(x)
-            _zero_counts[i] = filters[i].ab_zero_counts
-        self.filterset = filterset
-        self.filter_dir = filter_dir
-        self.transmission_effiency = Tensor(_epsilon).to(self.device)
-        self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
 
     def predict_mag(self, params, log_stellar_mass=None, redshift=None, **kwargs):
         """
@@ -987,7 +1030,7 @@ class Speculator():
 
         if noise == 'nsa' or noise == 'gama':
             # Add noise based on NSA noise model.
-            self._parse_nsa_noise_model(noise_model_dir)
+            self._parse_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
             _sigs_mags = torch.zeros_like(mags)
             _sig_flux = torch.zeros_like(mags)
@@ -1009,7 +1052,8 @@ class Speculator():
         elif noise == None:
             pass
         else:
-            raise ValueError('The noise model should be either nsa or gama or snr or None')
+            raise ValueError(
+                'The noise model should be either nsa or gama or snr or None')
 
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(maggies)
@@ -1029,11 +1073,10 @@ class Speculator():
             pickle.dump(self, f)
 
 
-class SuperSpeculator():
+class SuperSpeculator(Speculator):
     """
     A class to combine different speculators trained for certain wavelengths.
     """
-
     from .models import lightspeed, to_cgs_at_10pc
 
     def __init__(self, speculators_dir=None, str_wbin=[
@@ -1042,7 +1085,7 @@ class SuperSpeculator():
         '.w3600_5500',
         '.w5500_7410',
         '.w7410_60000'
-    ], wavelength=None, params_name=None, device='cuda'):
+    ], wavelength=None, params_name=None, device='cuda', use_speclite=True):
         """
         Initialize the SuperSpeculator.
 
@@ -1059,7 +1102,7 @@ class SuperSpeculator():
             Please follow the order such that redshift is the second last one, 
             and log stellar mass is the last one.
         device: str. The device to run the model.
-
+        use_speclite: bool. Whether to use speclite to compute magnitudes.
         """
         speculators = []
         for file in speculators_dir:
@@ -1069,242 +1112,83 @@ class SuperSpeculator():
         for _speculator in speculators:
             _speculator.device = device
             _speculator.network.eval()
-            assert _speculator._model == 'NMF', 'Only NMF model is supported.'
+            assert _speculator._model in [
+                'NMF', 'NMF_ZH'], 'Only NMF and NMF_ZH models are supported.'
 
-        self._model = 'NMF'
+        self._model = _speculator._model
         self.speculators = speculators
         self.str_wbin = str_wbin
         self.device = device
-        self.wavelength = torch.Tensor(wavelength).to(self.device)
+        self.wave_obs = torch.Tensor(wavelength).to(self.device)
         self.params_name = params_name
+        self.use_speclite = use_speclite
         self._build_distance_interpolator()
         self._build_params_prior()
-
-    def _build_distance_interpolator(self):
-        """
-        Since the `astropy.cosmology` is not differentiable, we build a distance
-        interpolator which allows us to calculate the luminosity distance at
-        any given redshift in a differentiable way.
-
-        Here the cosmology is Planck15, NOT consistent with `prospector`.
-        """
-        from astropy.cosmology import Planck15 as cosmo
-        z_grid = torch.arange(0, 5, 0.001)
-        dist_grid = torch.Tensor(
-            cosmo.luminosity_distance(z_grid).value)  # Mpc
-        self.z_grid = z_grid.to(self.device)
-        self.dist_grid = dist_grid.to(self.device)
-
-    def _build_params_prior(self):
-        """
-        Hard bound prior for the input physical parameters.
-        E.g., redshift cannot be negative. 
-        We replace zero with 1e-10 such that its log is not -inf.
-
-        WARNING:
-        / This prior should be consistant with the \
-        \ prior used in training the emulator.     /
-        ----------------------------------------
-                \   ^__^
-                \  (oo)\_______
-                    (__)\       )\/\
-                        ||----w |
-                        ||     ||
-        """
-        if self._model == 'tau':
-            self.prior = {'tage': [0, 14],
-                          'logtau': [-4, 4],
-                          'logzsol': [-3, 2],
-                          'dust2': [0, 5],
-                          'logm': [0, 16],
-                          'redshift': [0, 10]}
-        elif self._model == 'NMF':
-            self.prior = {'kappa1_sfh': [1e-10, 1],
-                          'kappa2_sfh': [1e-10, 1],
-                          'kappa3_sfh': [1e-10, 1],
-                          # uniform from 0 to 1. Will be tranformed to betas. 1e-10 for numerical stability.
-                          'fburst': [1e-10, 1.0], 'tburst': [1e-2, 13.27],
-                          'logzsol': [-2.6, 0.3],
-                          'dust1': [1e-10, 3], 'dust2': [1e-10, 3], 'dust_index': [-3, 1],
-                          'logm': [1e-10, 16],
-                          'redshift': [1e-10, 1.5]
-                          }
-
         self.bounds = np.array([self.prior[key] for key in self.params_name])
 
-    def _calc_transmission(self, filterset, filter_dir=None):
-        import sys
-        sys.path.append('/home/jiaxuanl/Research/Packages/sedpy/')
-
-        """
-        Interploate and evaluate transmission curves at `self.wave_obs`.
-        Also calculate the zeropoint in each filter.
-        The interpolated transmission efficiencies are saved in `self.transmission_effiency`.
-        And the zeropoint counts of each filter are saved in `self.ab_zero_counts`.
-
-        Parameters
-        ----------
-        filterset: list of strings.
-            Names of filters, e.g., ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
-            You can look up at available filters using `sedpy.observate.list_available_filters`.
-        """
-        x = self.wavelength.cpu().detach().numpy()
-
-        # transmission efficiency
-        _epsilon = np.zeros((len(filterset), len(x)))
-        _zero_counts = np.zeros(len(filterset))
-        if filter_dir is None:
-            filters = observate.load_filters(filterset)
-        else:
-            filters = observate.load_filters(filterset, directory=filter_dir)
-
-        for i in range(len(filterset)):
-            _epsilon[i] = interp1d(filters[i].wavelength,
-                                   filters[i].transmission,
-                                   bounds_error=False,
-                                   fill_value=0)(x)
-            _zero_counts[i] = filters[i].ab_zero_counts
-        self.filterset = filterset
-        self.filter_dir = filter_dir
-        self.transmission_effiency = Tensor(_epsilon).to(self.device)
-        self.ab_zero_counts = Tensor(_zero_counts).to(self.device)
-
-    def _parse_nsa_noise_model(self, noise_model_dir):
-        """
-        Parse the noise model from the NSA.
-        The noise model is generated in `popsed/notebook/forward_model/noise_model/``.
-
-        Parameters
-        ----------
-        noise_model_dir: str. The directory of the noise model file.
-        """
-        meds_sigs, stds_sigs = np.load(noise_model_dir, allow_pickle=True)
-        # meds_sigs is the median of noise, stds_sigs is the std of noise. All in magnitude.
-
-        n_filters = len(meds_sigs)
-        mag_grid = torch.arange(10, 30, 1)
-        med_sig_grid = torch.vstack(
-            [Tensor(meds_sigs[i](mag_grid)) for i in range(n_filters)])
-        std_sig_grid = torch.vstack(
-            [Tensor(stds_sigs[i](mag_grid)) for i in range(n_filters)])
-
-        self.mag_grid = mag_grid.to(self.device)
-        self.med_sig_grid = med_sig_grid.T.to(self.device)
-        self.std_sig_grid = std_sig_grid.T.to(self.device)
-
-    def predict(self, params):
-        """
-        Predict the PCA coefficients of the spectrum, given the SPS physical parameters.
-        Note: this is in restframe, and the spectrum is scaled to 1 M_sun.
-
-        Parameters
-        ----------
-        params (torch.Tensor): SPS physical parameters, shape = (n_samples, n_params).
-
-        Returns
-        -------
-        pca_coeff (torch.Tensor): PCA coefficients, shape = (n_samples, n_pca_coeffs).
-        """
-        if not torch.is_tensor(params):
-            params = torch.Tensor(params).to(self.device)
-        params = params.to(self.device)
-
-        return torch.hstack([_speculator.predict(params) for _speculator in self.speculators])
-
-    def _predict_spec_restframe(self, params, log_stellar_mass=None):
+    def _predict_spec_restframe(self, params):
         """
         Predict the corresponding spectra (in linear scale) for given physical parameters.
-        The predicted spectra are in restframe.
+        Not redshifting the spectra. Notice that the `dfactor` is involved only in `self.transform`. 
+
+        If the model is NMF, the SPS parameters contain redshift as a proxy for age.
+        Therefore, the input params is like [SPS params (including redshift), stellar mass].
+        The output spectra is in unit of Lsun/AA. **This is peraa, not perHz.**
 
         Parameters
         ----------
         params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
             shape = (n_samples, n_params).
-        log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
+            params[:, :-1] are the SPS physical parameters NOT including stellar mass and redshift.
+                If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
+            params[:, -1:] is the log10 stellar mass.
 
         Returns
         -------
         spec: torch.Tensor. The predicted spectra, shape = (n_wavelength, n_samples).
+        **Notice** that if `self._model == "NMF"`, the output spectra is in unit of Lsun/Hz.
         """
         if not torch.is_tensor(params):
             params = torch.Tensor(params).to(self.device)
         params = params.to(self.device)
-        if log_stellar_mass is None:
-            log_stellar_mass = torch.zeros_like(params[:, 0:1])
 
+        # The output spectra is restframe in unit of Lsun/AA.
         return torch.hstack(
-            [_speculator._predict_spec_with_mass_restframe(
-                torch.hstack([params, log_stellar_mass])
-            ) for _speculator in self.speculators])
-
-    def transform(self, spectra_restframe, z, islog=False):
-        """
-        Redshift spectra.
-        Linear interpolation is used. Values outside
-        the interpolation range are linearly interpolated.
-        **We have to redshift the spectra after combining them in restframe.**
-
-        Parameters
-        ----------
-        spectra_restframe: torch.Tensor.
-            Restframe spectra in **linear** flux, shape = (n_wavelength, n_samples).
-        z: torch.Tensor or np.ndarray.
-            Redshifts of each spectra, shape = (n_samples,).
-        islog: bool.
-            Whether the input spectra is in log10-flux.
-            If True, the output spectra is also in log10-flux.
-
-        Returns
-        -------
-        spectra_transformed: torch.Tensor. Redshifted spectra.
-        """
-        if not torch.is_tensor(z):
-            z = torch.tensor(z, dtype=torch.float).to(self.device)
-        z = z.squeeze()
-
-        if torch.any(z > 0):
-            wave_redshifted = (self.wavelength.unsqueeze(1) * (1 + z)).T
-
-            distances = Interp1d()(self.z_grid, self.dist_grid, z)
-            # 1e5 because the absolute mag is 10pc.
-            dfactor = ((distances * 1e5)**2 / (1 + z))
-            # dfactor = ((distances * 1e5)**2)
-            # Interp1d function takes (1) the positions (`wave_redshifted`) at which you look up the value
-            # in `spectrum_restframe`, learn the interpolation function, and apply it to observation wavelengths.
-            if islog:
-                spec = Interp1d()(wave_redshifted, spectra_restframe,
-                                  self.wavelength) - torch.log10(dfactor.T)
-            else:
-                spec = Interp1d()(wave_redshifted, spectra_restframe, self.wavelength) / dfactor.T
-            return spec
-        else:
-            return spectra_restframe
+            [_speculator._predict_spec_with_mass_restframe(params) for _speculator in self.speculators])
 
     def _predict_spec_with_mass_redshift(self, params,
                                          external_redshift=None):
         """
         Predict the corresponding spectra (in linear scale) for given physical parameters.
+        If the model is NMF, the SPS parameters contain redshift as a proxy for age.
+        Therefore, the input params is like [SPS params (including redshift), stellar mass, redshift].
+        The output spectra is in unit of erg/s/cm^2/AA at your given redshift distance. 
+        **This is peraa, not perHz.**
         **We have to redshift the spectra after combining them in restframe.**
 
         Parameters
         ----------
+        Let's make some change. The input params is like 
+        [SFH, ZH, dust, redshift, stellar mass]. Therefore, we will make use of redshift twice.
+        Once for calculating tage, once for calculating luminosity distance and redshifting the spectrum.
+        This is different from the `_predict_spec_restframe` function of the original Speculator.
+
         params: torch.Tensor.
             SPS physical parameters, including stellar mass. shape = (n_samples, n_params).
-            params[:, :-2] are the SPS physical parameters NOT including stellar mass and redshift.
+            params[:, :-1] are the SPS physical parameters NOT including stellar mass and redshift.
                 If you are using non-parametric SPS model, you might include redshift (as a proxy for t_age).
-            params[:, -2:-1] is the log10 stellar mass.
-            params[:, -1:] is the redshift, used to shift and dim the spectra.
+            params[:, -1:] is the log10 stellar mass.
 
         Returns
         -------
         spec: torch.Tensor.
             Predicted spectra in linear scales, shape = (n_wavelength, n_samples).
+            The unit is erg/s/cm^2/AA at your given redshift distance.
         """
         if not torch.is_tensor(params):
             params = torch.Tensor(params).to(self.device)
         params = params.to(self.device)
-        spec_rest = self._predict_spec_restframe(
-            params[:, :-1], log_stellar_mass=params[:, -1:])  # restframe
+        spec_rest = self._predict_spec_restframe(params[:, :])  # restframe
 
         # if torch.any(torch.log10(spec_rest) > thresh):
         #     # print(f'log spec > {thresh} params:',
@@ -1323,37 +1207,37 @@ class SuperSpeculator():
         spec[torch.any(torch.log10(spec_rest) > thresh, dim=1)] = 1e-30
         return spec
 
-    def predict_spec(self, params, log_stellar_mass=None, redshift=None):
-        """
-        Predict the corresponding spectra (in linear scale) for given physical parameters.
-        The predicted spectra are in restframe.
+    # def predict_spec(self, params, log_stellar_mass=None, redshift=None):
+    #     """
+    #     Predict the corresponding spectra (in linear scale) for given physical parameters.
+    #     The predicted spectra are in restframe.
 
-        Parameters
-        ----------
-        params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
-            shape = (n_samples, n_params).
-        log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
-        redshift: torch.Tensor or np.ndarray. Redshift of each spectrum, shape = (n_samples).
+    #     Parameters
+    #     ----------
+    #     params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
+    #         shape = (n_samples, n_params).
+    #     log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
+    #     redshift: torch.Tensor or np.ndarray. Redshift of each spectrum, shape = (n_samples).
 
-        Returns
-        -------
-        spec: torch.Tensor. The predicted spectra, shape = (n_wavelength, n_samples).
-        """
-        if not torch.is_tensor(params):
-            params = torch.Tensor(params).to(self.device)
-        params = params.to(self.device)
-        if log_stellar_mass is None:
-            log_stellar_mass = torch.zeros_like(params[:, 0:1])
-        if redshift is None:
-            redshift = torch.zeros_like(params[:, 0:1])
+    #     Returns
+    #     -------
+    #     spec: torch.Tensor. The predicted spectra, shape = (n_wavelength, n_samples).
+    #     """
+    #     if not torch.is_tensor(params):
+    #         params = torch.Tensor(params).to(self.device)
+    #     params = params.to(self.device)
+    #     if log_stellar_mass is None:
+    #         log_stellar_mass = torch.zeros_like(params[:, 0:1])
+    #     if redshift is None:
+    #         redshift = torch.zeros_like(params[:, 0:1])
 
-        return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass]).to(self.device),
-                                                     external_redshift=redshift)
+    #     return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass]).to(self.device),
+    #                                                  external_redshift=redshift)
 
     def _predict_mag_with_mass_redshift(self, params,
                                         external_redshift=None,
-                                        filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
-                                        noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10):
+                                        filterset: list = None,
+                                        noise=None, noise_model_dir=None, SNR=10):
         """
         Predict corresponding photometry (in magnitude), given SPS physical parameters.
 
@@ -1367,7 +1251,8 @@ class SuperSpeculator():
             params[:, -1:] is the redshift, used to shift and dim the spectra.
 
         filterset: list.
-            List of filters to predict photometry, default = ['sdss_{0}0'.format(b) for b in 'ugriz'].
+            List of filters to predict photometry, default = ['sdss-2010{0}'.format(b) for b in 'ugriz'].
+            The transmission curves are from `speclite`, and assumed airmass=1.3. See https://github.com/desihub/speclite/pull/76.
         nosie: str.
             Whether to add noise to the predicted photometry.
             If `noise=None`, no noise is added.
@@ -1383,6 +1268,8 @@ class SuperSpeculator():
             mags: torch.Tensor.
                 Predicted photometry, shape = (n_bands, n_samples).
         """
+        if filterset is None:
+            filterset = self.filterset
         if hasattr(self, 'filterset') and self.filterset != filterset:
             self.filterset = filterset
             self._calc_transmission(filterset)
@@ -1392,29 +1279,25 @@ class SuperSpeculator():
         elif hasattr(self, 'filterset') is False:
             self._calc_transmission(filterset)
 
-        # get magnitude from a spectrum
-        # lightspeed = 2.998e18  # AA/s
-        # jansky_cgs = 1e-23
-
         # Notice: for NMF-based emulator, we train the emulator based on spectra with Lsun/Hz unit.
-        # We convert Lsun/Hz to Lsun/AA, then to erg/s/AA at 10pc. The extra distance term is taken
-        # into account in the `transform` (redshifting).
-        if self._model == 'NMF':
+        # We convert Lsun/Hz to Lsun/AA in `_predict_spec_restframe`, then to erg/s/cm^2/AA at a given redshift.
+        # The extra distance term is taken into account in the `transform` (redshifting).
+        if self._model == 'NMF' or self._model == 'NMF_ZH':
             _spec = self._predict_spec_with_mass_redshift(
-                params, external_redshift=external_redshift) * self.lightspeed / self.wavelength**2 * self.to_cgs_at_10pc  # / external_redshift
+                params, external_redshift=external_redshift)  # erg/s/cm^2/AA
         else:
             raise NotImplementedError('Only NMF-based emulator is supported.')
         _spec = torch.nan_to_num(_spec, 0.0)
 
         maggies = torch.trapezoid(
-            ((self.wavelength * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
-             ), self.wavelength) / self.ab_zero_counts
+            ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
+             ), self.wave_obs) / self.ab_zero_counts
 
         maggies[maggies <= 0.] = 1e-15
 
         if noise == 'nsa' or noise == 'gama':
             # Add noise based on NSA noise model.
-            self._parse_nsa_noise_model(noise_model_dir)
+            self._parse_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
             _sigs_mags = torch.zeros_like(mags)
             _sig_flux = torch.zeros_like(mags)
@@ -1436,8 +1319,9 @@ class SuperSpeculator():
         elif noise == None:
             pass
         else:
-            raise ValueError('The noise model should be either nsa or gama or snr or None')
-            
+            raise ValueError(
+                'The noise model should be either nsa or gama or snr or None')
+
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(maggies)
         mags = -2.5 * torch.log10(maggies)
@@ -1445,7 +1329,7 @@ class SuperSpeculator():
         return mags
 
     def _predict_mag_with_mass_redshift_batch(self, params,
-                                              filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
+                                              filterset: list = None,
                                               noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10):
         """
         The wrapper for `_predict_mag_with_mass_redshift` for large sample size.
@@ -1462,36 +1346,29 @@ class SuperSpeculator():
                 data, filterset=filterset, noise=noise, noise_model_dir=noise_model_dir, SNR=SNR).clone().cpu()
         torch.cuda.empty_cache()
         return mags
-        # mags = self._predict_mag_with_mass_redshift(
-        #     data, filterset=filterset, noise=noise,
-        #     noise_model_dir=noise_model_dir, SNR=SNR)
-        # if size == 1:
-        #     return mags
-        # else:
-        #     yield mags
 
-    def predict_mag(self, params, log_stellar_mass=None, redshift=None, **kwargs):
-        """
-        Predict the corresponding magnitude for given physical parameters.
+    # def predict_mag(self, params, log_stellar_mass=None, redshift=None, **kwargs):
+    #     """
+    #     Predict the corresponding magnitude for given physical parameters.
 
-        Parameters
-        ----------
-        params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
-            shape = (n_samples, n_params).
-        log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
-        redshift: torch.Tensor or np.ndarray. Redshift of each spectrum, shape = (n_samples).
-        kwargs: you can pass filterset and noise model here. See `self._predict_mag_with_mass_redshift`.
+    #     Parameters
+    #     ----------
+    #     params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
+    #         shape = (n_samples, n_params).
+    #     log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
+    #     redshift: torch.Tensor or np.ndarray. Redshift of each spectrum, shape = (n_samples).
+    #     kwargs: you can pass filterset and noise model here. See `self._predict_mag_with_mass_redshift`.
 
-        Returns
-        -------
-        mag: torch.Tensor. The predicted magnitudes, shape = (n_wavelength, n_samples).
-        """
-        if not torch.is_tensor(params):
-            params = torch.Tensor(params).to(self.device)
-        params = params.to(self.device)
-        if log_stellar_mass is None:
-            log_stellar_mass = torch.zeros_like(params[:, 0:1])
-        if redshift is None:
-            redshift = torch.zeros_like(params[:, 0:1])
-        return self._predict_mag_with_mass_redshift(torch.hstack([params, log_stellar_mass]).to(self.device), external_redshift=redshift,
-                                                    **kwargs)
+    #     Returns
+    #     -------
+    #     mag: torch.Tensor. The predicted magnitudes, shape = (n_wavelength, n_samples).
+    #     """
+    #     if not torch.is_tensor(params):
+    #         params = torch.Tensor(params).to(self.device)
+    #     params = params.to(self.device)
+    #     if log_stellar_mass is None:
+    #         log_stellar_mass = torch.zeros_like(params[:, 0:1])
+    #     if redshift is None:
+    #         redshift = torch.zeros_like(params[:, 0:1])
+    #     return self._predict_mag_with_mass_redshift(torch.hstack([params, log_stellar_mass]).to(self.device), external_redshift=redshift,
+    #                                                 **kwargs)
