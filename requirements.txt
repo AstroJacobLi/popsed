@@ -1,6 +1,6 @@
 fire
 geomloss
-pykeops (troublesome)
+pykeops
 h5py
 corner
 nflows
@@ -10,9 +10,12 @@ multiprocess
 fsps
 speclite
 
-https://github.com/aliutkus/torchinterp1d
-https://github.com/bd-j/sedpy
+git+https://github.com/aliutkus/torchinterp1d.git
+git+https://github.com/bd-j/sedpy.git
 
-pip3 install sphinx-autodoc-typehints sphinx_rtd_theme
-pip install myst-nb sphinx_remove_toctrees sphinx_copybutton
-pip install sphinx-book-theme
+sphinx-autodoc-typehints
+sphinx_rtd_theme
+myst-nb
+sphinx_remove_toctrees
+sphinx_copybutton
+sphinx-book-theme
