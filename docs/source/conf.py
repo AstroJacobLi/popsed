@@ -69,7 +69,7 @@ html_theme_options = {
 
 # The name of an image file (relative to this directory) to place at the top
 # of the sidebar.
-html_logo = '_static/jax_logo_250px.png'
+html_logo = '_static/popsed_logo-min.png'
 
 html_favicon = '_static/favicon.png'
 
