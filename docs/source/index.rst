@@ -7,12 +7,12 @@ Welcome to popsed's documentation!
 ==================================
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Contents:
 
-   api
-
-   math.md
+   intro.md
+   speculator.md
+   nde.md
 
 
 

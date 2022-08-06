@@ -7,6 +7,7 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 import os
 import sys
+sys.path.append(os.path.abspath('..'))
 project = 'popsed'
 copyright = '2022, Jiaxuan Li'
 author = 'Jiaxuan Li'
@@ -29,7 +30,8 @@ extensions = [
     # 'myst_nb',
     "sphinx_remove_toctrees",
     'sphinx_copybutton',
-    "myst_parser"
+    "myst_parser",
+    "sphinxcontrib.asciiart"
 ]
 
 
@@ -57,12 +59,12 @@ napolean_use_rtype = False
 html_static_path = ['_static']
 html_theme = 'sphinx_book_theme'
 
-# Theme options are theme-specific and customize the look and feel of a theme
+# Theme options are theme-ific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
 html_theme_options = {
     'logo_only': True,
-    'show_toc_level': 2,
+    'show_toc_level': 1,
 }
 
 # The name of an image file (relative to this directory) to place at the top
