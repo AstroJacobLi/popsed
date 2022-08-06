@@ -64,11 +64,32 @@ The ``SuperSpeculator`` class is used to combine several individual ``Speculator
 Other classes
 ----------------
 
-.. currentmodule:: popsed.speculator
+.. currentmodule:: popsed.speculator.StandardScaler
+.. autoclass:: popsed.speculator.StandardScaler
+.. autosummary:: 
+    :toctree: _autosummary
 
-.. autoclass:: StandardScaler
-    :members:
+    __init__
+    fit
+    transform
+    inverse_transform
+
+.. currentmodule:: popsed.speculator.SpectrumPCA
+.. autoclass:: popsed.speculator.SpectrumPCA
+.. autosummary:: 
+   :toctree: _autosummary
+
+    __init__
+    scale_spectra
+    train_pca
+    inverse_transform
+    validate_pca_basis
+    save
+
 .. autoclass:: CustomActivation
+
 .. autoclass:: FC
+
 .. autoclass:: Network
+
 ```

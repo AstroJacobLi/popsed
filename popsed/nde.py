@@ -1,5 +1,7 @@
 '''
-Neural density estimator for population-level inference. 
+Neural density estimator for the population-level inference. I borrowed the code for normalizing flow from 
+Jakob Macke's beautiful packages `sbi <https://github.com/mackelab/sbi/blob/main/sbi/neural_nets/flow.py>`_.
+But here everything is `NOT` conditioned.
 '''
 import gc
 import torch
@@ -25,12 +27,6 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.model_selection import train_test_split
 from popsed.speculator import StandardScaler
 from geomloss import SamplesLoss
-
-
-"""
-I steal the NF code from https://github.com/mackelab/sbi/blob/019fde2d61edbf8b4a02e034dc9c056b0d240a5c/sbi/neural_nets/flow.py#L77
-But here everything is NOT conditioned.
-"""
 
 
 def build_maf(
@@ -272,17 +268,25 @@ class NeuralDensityEstimator(object):
 
         Parameters
         ----------
-        normalize: Whether to z-score the data that you want to model.
-        initial_pos: Initial position of the density, 
-            e.g., `{'bounds': [[1, 2], [0, 1]], 'std': [1, .05]}`.
+        normalize: bool.
+            Whether to z-score the data that you want to model.
+        initial_pos: dict.
+            Initial position of the density, 
+            e.g., ``{'bounds': [[1, 2], [0, 1]], 'std': [1, .05]}``.
             It includes the bounds for sampling the means of Gaussians, 
             and the standard deviations of the Gaussians.
-        method: Method to use for density estimation, either 'nsf' or 'maf'.
-        hidden_features: Number of hidden features.
-        num_transforms: Number of transforms.
-        num_bins: Number of bins used for the splines.
-        embedding_net: Optional embedding network for y.
-        kwargs: Additional arguments that are passed by the build function but are not
+        method: str.
+            Method to use for density estimation, either ``'nsf'`` or ``'maf'``.
+        hidden_features: int. 
+            Number of hidden features.
+        num_transforms: int. 
+            Number of transforms.
+        num_bins: int.
+            Number of bins used for the splines.
+        embedding_net: torch.nn.Module. 
+            Optional embedding network for y.
+        kwargs: dict.
+            Additional arguments that are passed by the build function but are not
             relevant for maf and are therefore ignored.
         """
         self.device = torch.device(
@@ -314,10 +318,12 @@ class NeuralDensityEstimator(object):
 
         Parameters
         ----------
-        batch_theta (torch.Tensor): the input data whose distribution will be modeled by NDE.
-        optimizer (float): the optimizer to use for training, default is Adam.
-        lr (float): learning rate for the optimizer.
-
+        batch_theta: torch.Tensor.  
+            The input data whose distribution will be modeled by NDE.
+        optimizer: float. 
+            The optimizer to use for training, default is ``Adam``.
+        lr: float. 
+            The learning rate for the optimizer.
         """
         if not torch.is_tensor(batch_theta):
             batch_theta = torch.tensor(batch_theta, device=self.device)
@@ -358,14 +364,16 @@ class NeuralDensityEstimator(object):
     def _train(self, n_epochs: int = 2000, display=False, suffix: str = "nde"):
         """
         Train the neural density estimator based on input data.
-        Here we use the log(P) loss. This function is not used in the project.
+        Here we use the ``log(P)`` loss. This function is not used in the ``popsed`` project.
 
         Parameters
         ----------
-        n_epochs: Number of epochs to train.
-        display: Whether to display the training loss.
-        suffix: Suffix to add to the output file.
-
+        n_epochs: int. 
+            Number of epochs to train.
+        display: bool.
+            Whether to display the training loss.
+        suffix: str. 
+            Suffix to add to the output file.
         """
         min_loss = -19
         patience = 5
@@ -395,15 +403,18 @@ class NeuralDensityEstimator(object):
 
     def sample(self, n_samples: int = 1000):
         """
-        Sample according to the fitted NDE
+        Sample according to the fitted NDE.
 
         Parameters
         ----------
-        n_samples: Number of samples to draw.
+        n_samples: int. 
+            Number of samples to draw. 
+            If the number is too large, the GPU memory may be insufficient.
 
         Returns
         -------
-        samples: Samples drawn from the NDE.
+        samples: torch.Tensor. 
+            Samples drawn from the NDE.
         """
         return self.net.sample(n_samples)
 
@@ -413,8 +424,8 @@ class NeuralDensityEstimator(object):
 
         Parameters
         ----------
-        min_loss: a horizontal line at `min_loss` will be shown.
-
+        min_loss: float. 
+            A horizontal line at ``min_loss`` will be shown.
         """
         # min_loss is the intrinsic minimum loss
         import matplotlib.pyplot as plt
@@ -434,8 +445,8 @@ class NeuralDensityEstimator(object):
 
         Parameters
         ----------
-        filename: Name of the file to save the model.
-
+        filename: str. 
+            Name of the file to save the model.
         """
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
@@ -443,7 +454,9 @@ class NeuralDensityEstimator(object):
 
 class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
     """
-    Wasserstein Neural Density Estimator. We use this class in the paper.
+    We train the neural density estimator to map the SPS parameter distribution. 
+    Then we sample from the NDE, forward-model to the photometry space, and compute the Wasserstein distance
+    between data and model prediction. This Wasserstein distance is used as loss for training the NDE.
     """
 
     def __init__(
@@ -466,23 +479,37 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         Parameters
         ----------
-        normalize: bool, whether to normalize the input data. Default is True.
-        initial_pos: dict, the initial position of the Gaussians in NF. 
-            E.g., `{'bounds': [[1, 2], [0, 1]], 'std': [1, .05]}`.
+        normalize: bool. 
+            Whether to normalize the input data. Default is True.
+        initial_pos: dict. 
+            The initial position of the Gaussians of normalizing flow. 
+            E.g., ``{'bounds': [[1, 2], [0, 1]], 'std': [1, .05]}``.
             It includes the bounds for sampling the means of Gaussians, 
             and the standard deviations of the Gaussians.
-        method: str, the method to use for NDE. Default is 'nsf'. 
+        method: str. 
+            The method to use for NDE. Default is 'nsf'. 
             Only support 'nsf' and 'maf' now.
-        sps_model: str, the model to use for SPS. Default is 'NMF'.
-        seed: int, random seed. If None, will randomly generate one.
-        hidden_features: int, number of hidden features.
-        num_transforms: int, number of transforms.
-        num_bins: int, number of bins. Only works for `method='nsf'`.
-        embedding_net: nn.Module, the embedding net. Default is nn.Identity().
-        output_dir: str, the output directory. Default is './nde_theta/'.
-        regularize: bool, whether to transform the physical parameters using Gaussian CDF. 
+        sps_model: str. 
+            The model to use for SPS. Default is ``'NMF'``. 
+            Now support ``'NMF'`` and ``'NMF_ZH'``.
+        seed: int.
+            Random seed. If None, will randomly generate one.
+            Random seed is used to train many different NDEs.
+        hidden_features: int. 
+            Number of hidden features.
+        num_transforms: int. 
+            Number of transforms.
+        num_bins: int. 
+            Number of bins in ``nsf``. Only works for ``method='nsf'``.
+        embedding_net: torch.nn.Module. 
+            The embedding net. Default is ``nn.Identity()``.
+        output_dir: str. 
+            The output directory. Default is ``'./nde_theta/'``.
+        regularize: bool. 
+            Whether to transform the physical parameters using Gaussian CDF. 
             Default is False.
-        NDE_prior: array, the prior (tophat bounds) used to do the transformation.
+        NDE_prior: array. 
+            The prior (tophat bounds) used to do the CDF transformation.
         """
         super(WassersteinNeuralDensityEstimator, self).__init__(
             normalize=normalize,
@@ -516,12 +543,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             except:
                 pass
 
-        # Set penalty term
+        # Set penalty term. This is deprecated.
         if self.sps_model == 'NMF':
-            # self.penalty_powers = [10] * 11
-            # self.penalty_powers = [30] * 3 + [30] * 2 + [30] + [20] * 3 + [30] * 2 # 30 for dust1 and dust2
             self.penalty_powers = [50] * 3 + [50] * 6 + [50] + [100] + [50]
-            #[100] * 9 + [500] + [100] + [500]
         else:
             self.penalty_powers = [100, 100, 100, 100, 50, 500]
 
@@ -536,21 +560,27 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
               batch_theta: Tensor,
               batch_X: Tensor,
               z_score=True,
-              filterset: list = ['sdss_{0}0'.format(b) for b in 'ugriz'],
+              filterset: list = ['sdss2010-{0}'.format(b) for b in 'ugriz'],
               optimizer: str = "adam",
               lr=1e-3, **kwargs):
         """
-        Build the neural density estimator based on input data.
+        Build the neural density estimator based on the input data.
+        The input photometry data ``batch_X`` is z-scored in this function.
 
         Parameters
         ----------
-        batch_theta: Tensor, the stellar population parameters input parameters.
+        batch_theta: torch.Tensor. 
+            The stellar population parameters (although this is what we want to infer).
             This is only needed to construct the NDE (i.e., need dimensions for network).
-        batch_X: Tensor, the input photometry data.
-        filterset: list, the filterset to use. Default is ['sdss_u0', 'sdss_g0', 'sdss_r0', 'sdss_i0', 'sdss_z0'].
-        optimizer: str, the optimizer to use. Default is 'adam'.
-        lr: float, the learning rate. Default is 1e-3.
-
+            You can just pass something like ``torch.ones(len(X_train), 11)``, where ``X_train`` is the photometry data.
+        batch_X: torch.Tensor. 
+            The input photometry data. shape = (n_galaxies, n_bands).
+        filterset: list. 
+            The filterset to use. Default is ``['sdss2010-{0}'.format(b) for b in 'ugriz']``.
+        optimizer: str. 
+            The optimizer to use. Default is ``'adam'``.
+        lr: float. 
+            The learning rate. Default is 1e-3.
         """
         from torch.utils.data import DataLoader
         super().build(batch_theta, optimizer, lr, **kwargs)
@@ -565,8 +595,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         scaler.fit(batch_X)
         self.scaler = scaler
         self.z_score = z_score
-        # dataloader = DataLoader(batch_X, batch_size=2000, shuffle=True)
-        # self.X = [yield scaler.transform(x, device='cpu').detach() for x in dataloader]
+
         if self.z_score:
             self.X = self.scaler.transform(
                 batch_X).detach()  # z-scored observed SEDs
@@ -576,7 +605,6 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         self.X = self.X.to(self.device)
 
         self.filterset = filterset
-        # scaler.device = self.device
 
     def load_validation_data(self, X_vali):
         """
@@ -584,7 +612,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         Parameters
         ----------
-        X_vali: Tensor, the photometry for validation.
+        X_vali: torch.Tensor. 
+            The photometry for validation. shape = (n_galaxies, n_bands).
         """
         if not torch.is_tensor(X_vali):
             X_vali = torch.tensor(X_vali, device='cpu')
@@ -599,6 +628,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
     def _get_loss(self, X, speculator, n_samples,
                   noise, SNR, noise_model_dir,
                   loss_fn):
+        """
+        To be deprecated.
+        """
         sample = self.sample(n_samples)
         Y = self.scaler.transform(
             speculator._predict_mag_with_mass_redshift(
@@ -636,28 +668,39 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                       noise, SNR, noise_model_dir,
                       loss_fn, add_penalty=False, regularize=False):
         """
-        The most important funcgtion in this class. This defines the loss.
+        The most important function for WassersteinNeuralDensityEstimator. 
+        This defines the loss function for the NMF-based SPS model.
         This function only works for NMF-based SPS.
 
         Parameters
         ----------
-        X: Tensor, the observed photometry data (after being z-scored). 
-            Typically, X = self.X.
-        speculator: SuperSpeculator, which is the emulator for the SEDs.
-        n_samples: int, the number of samples to use. Recommended to be ~5000.
-        noise: float, the noise model. Either 'snr' or 'nsa' or None. 
+        X: torch.Tensor. 
+            The observed photometry data (after being z-scored in :py:meth:`build`). 
+        speculator: ``SuperSpeculator`` class.  
+            SED emulator, used to generate the synthetic photometry.
+        n_samples: int. 
+            The number of samples to use. Recommended to be 5000-10000 (depends on your GPU memory).
+        noise: float. 
+            The noise model. You can choose from ``'snr', 'nsa', 'gama', None``. 
             If 'snr', you also need to provide the SNR argument.
-            If 'nsa', you also need to provide the noise_model_dir argument.
-        SNR: float, the signal-to-noise ratio to use if noise is 'snr'.
-        noise_model_dir: str, the directory of the NSA noise model.
-        loss_fn: the loss function to use. Here we use Wasserstein loss.
-        add_penalty: bool, whether to only add the penalty term to loss.
-        regularize: bool. Whether the SED params are transformed using log10 and sigmoid.
+            If ``'nsa', 'gama'``, you also need to provide the ``noise_model_dir`` argument.
+        SNR: float. 
+            The signal-to-noise ratio to use if noise is ``'snr'``.
+        noise_model_dir: str. 
+            The directory of the noise model.
+        loss_fn: torch function. 
+            The loss function to use. Here we use Wasserstein loss from ``geomloss``.
+        add_penalty: bool. 
+            Whether adding the penalty term to the loss.
+        regularize: bool. 
+            Whether the SED params are CDF-transformed.
 
         Returns
         -------
-        loss: Tensor, the loss.
-        penalty: Tensor, the penalty term.
+        loss: torch.Tensor. 
+            The Wasserstein loss between data and synthetic photometry.
+        penalty: torch.Tensor.  
+            This can be the fraction of bad photometry, or the user-defined penalty term.
         """
         assert noise in [None, 'snr', 'gama',
                          'nsa'], 'Only support `snr`, `nsa`, `gama`, or `None` now.'
@@ -745,6 +788,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
               n_epochs: int = 100,
               lr=1e-3,
               speculator=None,
+              n_samples=10000,
               noise='nsa',
               SNR=20,
               noise_model_dir=None,
@@ -757,19 +801,32 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         Parameters
         ----------
-        n_epochs: int, the number of epochs to train.
-        lr: float, the learning rate.
-        speculator: SuperSpeculator, which is the emulator for the SEDs.
-        noise: str, the noise model. Either 'snr' or 'nsa' or None.
+        n_epochs: int. 
+            The number of epochs to train.
+        lr: float. 
+            The learning rate for ``adam``.
+        speculator: ``SuperSpeculator`` class.  
+            SED emulator, used to generate the synthetic photometry.
+        n_samples: int. 
+            The number of samples to use. Recommended to be 5000-10000 (depends on your GPU memory).
+        noise: float. 
+            The noise model. You can choose from ``'snr', 'nsa', 'gama', None``. 
             If 'snr', you also need to provide the SNR argument.
-            If 'nsa', you also need to provide the noise_model_dir argument.
-        SNR: float, the signal-to-noise ratio to use if noise is 'snr'.
-        noise_model_dir: str, the directory of the NSA noise model.
-        sinkhorn_kwargs: dict, the kwargs for the sinkhorn loss. 
+            If ``'nsa', 'gama'``, you also need to provide the ``noise_model_dir`` argument.
+        SNR: float. 
+            The signal-to-noise ratio to use if noise is ``'snr'``.
+        noise_model_dir: str. 
+            The directory of the noise model.
+        sinkhorn_kwargs: dict. 
+            The kwargs for the sinkhorn loss, e.g., ``{'p': 1, 'blur': 0.1, 'scaling': 0.5}``.
             See https://www.kernel-operations.io/geomloss/api/pytorch-api.html
-        scheduler: torch.optim.lr_scheduler, the learning rate scheduler.
-        regularize: bool. Whether the SED params are transformed using log10 and sigmoid.
-        detect_anomaly: bool, whether to detect the anomaly.
+        scheduler: torch.optim.lr_scheduler. 
+            The learning rate scheduler.
+        regularize: bool. 
+            Whether the SED params are CDF-transformed.
+        detect_anomaly: bool. 
+            Whether to detect the anomaly during training. 
+            If True, it will be super slow and super memory consuming...
         """
         torch.autograd.set_detect_anomaly(detect_anomaly)
 
@@ -789,7 +846,6 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.2, shuffle=True)
             # n_samples = len(X_train)
-            n_samples = 10000
             # aggr_loss = 0
             # for i in range(3):
             loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
@@ -837,8 +893,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         Parameters
         ----------
-        Y_truth: Tensor, the ground truth SED parameters.
-        p: int, the p-norm to use for sinkhorn loss.
+        Y_truth: torch.Tensor. 
+            The ground truth SED parameters.
+        p: int. 
+            The p-norm to use for sinkhorn loss.
 
         Returns
         -------
