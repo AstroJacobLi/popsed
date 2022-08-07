@@ -45,7 +45,7 @@ speculator._calc_transmission(gama_filters)
 # gama_filters = ['sdss_{0}0'.format(b) for b in 'ugriz']# + ['VIKING_{0}'.format(b) for b in ['Y']]
 # speculator._calc_transmission(gama_filters, filter_dir='./filters/gama/')
 
-noise = None #'snr'  # 'gama'
+noise = None  # 'snr'  # 'gama'
 noise_model_dir = './noise_model/gama_noise_model_mag_dr3_apmatch.npy'
 
 # Load NSA data
@@ -77,7 +77,8 @@ _prior_NDE[-2] = np.array([0., 1])
 _prior_NDE[-1] = np.array([7.5, 13])
 
 
-def train_NDEs(seed_low, seed_high, multijobs=False, num_transforms=5, num_bins=40, hidden_features=100,
+def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transforms=5,
+               num_bins=40, hidden_features=100,
                add_penalty=False, output_dir='./NDE/GAMA/{name}/nde_theta_{name}_DR3/'):
     # Start train NDEs
     from popsed.nde import WassersteinNeuralDensityEstimator
@@ -142,6 +143,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, num_transforms=5, num_bins=
                 NDE_theta.train(n_epochs=100,
                                 speculator=speculator,
                                 add_penalty=add_penalty,
+                                n_samples=n_samples,
                                 noise=noise, noise_model_dir=noise_model_dir,
                                 sinkhorn_kwargs={
                                     'p': 1, 'blur': blurs[i], 'scaling': 0.5},
