@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH -J NDE_GAMA_DR3_5_6
+#SBATCH -J NDE_GAMA_DR3_0_5
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
-#SBATCH --mem=8G
-#SBATCH --time=24:00:00
+#SBATCH --mem=6G
+#SBATCH --time=00:20:00
 #SBATCH --export=ALL
-#SBATCH --array=5-6
-#SBATCH -o ./log/NDE_GAMA_DR3_5_6_10_50_50.o
+
+#SBATCH -o ./log/NDE_GAMA_DR3_0_5_15_100_50.o
 #SBATCH --mail-type=all
 #SBATCH --mail-user=jiaxuanl@princeton.edu
 
@@ -17,7 +17,7 @@ echo "start time ... $now"
 module purge
 . /home/jiaxuanl/Research/popsed/script/setup_env.sh
 
-python train_nde_gama.py --num_transforms=10 --num_bins=50 --hidden_features=50 --output_dir=./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3/
+python train_nde_gama.py --seed_low=0 --seed_high=10 --num_transforms=15 --num_bins=50 --hidden_features=100 --output_dir=./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3/
 
 
 now=$(date +"%T")

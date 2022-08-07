@@ -10,11 +10,11 @@ import sys
 import fire
 
 
-def deploy_training_job(seed_low, seed_high, multijobs=True, python_file='train_nde_gama.py', name='GAMA_DR3', num_bins=20, num_transforms=5, hidden_features=100,
-                        only_penalty=False, output_dir='./NDE/NMF/nde_theta_NMF_NSA_freez/'):
+def deploy_training_job(seed_low, seed_high, multijobs=False, python_file='train_nde_gama.py', name='GAMA_DR3', num_bins=20, num_transforms=5, hidden_features=100,
+                        output_dir='./NDE/NMF/nde_theta_NMF_NSA_freez/'):
     ''' create slurm script and then submit 
     '''
-    time = "24:00:00"
+    time = "6:00:00"
 
     cntnt = '\n'.join([
         "#!/bin/bash",
@@ -22,7 +22,7 @@ def deploy_training_job(seed_low, seed_high, multijobs=True, python_file='train_
         "#SBATCH --nodes=1",
         "#SBATCH --ntasks-per-node=1",
         "#SBATCH --gres=gpu:1",
-        "#SBATCH --mem=8G",
+        "#SBATCH --mem=12G",
         "#SBATCH --time=%s" % time,
         "#SBATCH --export=ALL",
         f"#SBATCH --array={seed_low}-{seed_high}" if multijobs else "",
@@ -48,7 +48,7 @@ def deploy_training_job(seed_low, seed_high, multijobs=True, python_file='train_
     f = open('_train.slurm', 'w')
     f.write(cntnt)
     f.close()
-    os.system('sbatch _train.slurm')
+    # os.system('sbatch _train.slurm')
     #os.system('rm _train.slurm')
     return None
 
@@ -57,7 +57,7 @@ if __name__ == '__main__':
     fire.Fire(deploy_training_job)
 
 # 22.08.05
-# python deploy_nde_gama.py --output_dir='./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3/' --seed_low=0 --seed_high=5 --num_bins=50 --num_transforms=10 --hidden_features=50
+# python deploy_nde_gama.py --output_dir='./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3/' --seed_low=0 --seed_high=5 --num_bins=50 --num_transforms=15 --hidden_features=100
 # python deploy_nde_gama.py --output_dir='./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3/' --seed_low=5 --seed_high=6 --num_bins=50 --num_transforms=10 --hidden_features=50
 # python deploy_nde_gama.py --output_dir='./NDE/GAMA/NMF/nde_theta_NMF_CDF_DR3_20trans/' --seed_low=0 --seed_high=5 --num_bins=50 --num_transforms=20 --hidden_features=100
 

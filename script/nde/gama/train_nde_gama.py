@@ -45,7 +45,7 @@ speculator._calc_transmission(gama_filters)
 # gama_filters = ['sdss_{0}0'.format(b) for b in 'ugriz']# + ['VIKING_{0}'.format(b) for b in ['Y']]
 # speculator._calc_transmission(gama_filters, filter_dir='./filters/gama/')
 
-noise = 'snr'  # 'gama'
+noise = None #'snr'  # 'gama'
 noise_model_dir = './noise_model/gama_noise_model_mag_dr3_apmatch.npy'
 
 # Load NSA data
@@ -77,80 +77,85 @@ _prior_NDE[-2] = np.array([0., 1])
 _prior_NDE[-1] = np.array([7.5, 13])
 
 
-def train_NDEs(num_transforms=5, num_bins=40, hidden_features=100,
+def train_NDEs(seed_low, seed_high, multijobs=False, num_transforms=5, num_bins=40, hidden_features=100,
                add_penalty=False, output_dir='./NDE/GAMA/{name}/nde_theta_{name}_DR3/'):
     # Start train NDEs
     from popsed.nde import WassersteinNeuralDensityEstimator
-    seed = int(os.environ["SLURM_ARRAY_TASK_ID"])
 
-    _bounds = np.zeros_like(speculator.bounds)
-    _bounds = np.zeros_like(_bounds)
-    _bounds = np.vstack([-np.abs(np.random.normal(size=len(_bounds)) / 30),
-                         np.abs(np.random.normal(size=len(_bounds)) / 30)]).T
-    _stds = np.ones(len(_bounds))
-
-    X_train, X_vali = train_test_split(X_data, test_size=0.05)
-    if name == 'NMF_ZH':
-        Y_train = torch.ones(len(X_train), 12)
+    if multijobs == False:
+        seed_range = trange(seed_low, seed_high)
     else:
-        Y_train = torch.ones(len(X_train), 11)
+        seed_range = [int(os.environ["SLURM_ARRAY_TASK_ID"])]
+    for seed in seed_range:
+        # seed = int(os.environ["SLURM_ARRAY_TASK_ID"])
+        _bounds = np.zeros_like(speculator.bounds)
+        _bounds = np.zeros_like(_bounds)
+        _bounds = np.vstack([-np.abs(np.random.normal(size=len(_bounds)) / 30),
+                            np.abs(np.random.normal(size=len(_bounds)) / 30)]).T
+        _stds = np.ones(len(_bounds))
 
-    NDE_theta = WassersteinNeuralDensityEstimator(method='nsf',
-                                                  name=name,
-                                                  num_transforms=num_transforms,  # 15,  # 10
-                                                  num_bins=num_bins,  # 10,  # how smashed it is. 10
-                                                  hidden_features=hidden_features,  # 120,
-                                                  seed=seed,
-                                                  output_dir=output_dir,
-                                                  initial_pos={'bounds': _bounds,
-                                                               'std': _stds,
-                                                               },
-                                                  normalize=False,
-                                                  regularize=True,
-                                                  NDE_prior=_prior_NDE)
-    NDE_theta.build(
-        Y_train,
-        X_train,
-        filterset=gama_filters,
-        optimizer='adam')
-    NDE_theta.load_validation_data(X_vali)
-    NDE_theta.bounds = speculator.bounds
-    NDE_theta.params_name = speculator.params_name
-    NDE_theta.external_redshift_data = None  # z_nsa
+        X_train, X_vali = train_test_split(X_data, test_size=0.05)
+        if name == 'NMF_ZH':
+            Y_train = torch.ones(len(X_train), 12)
+        else:
+            Y_train = torch.ones(len(X_train), 11)
 
-    print('Total number of params in the model:',
-          sum(p.numel() for p in NDE_theta.net.parameters() if p.requires_grad))
+        NDE_theta = WassersteinNeuralDensityEstimator(method='nsf',
+                                                      name=name,
+                                                      num_transforms=num_transforms,  # 15,  # 10
+                                                      num_bins=num_bins,  # 10,  # how smashed it is. 10
+                                                      hidden_features=hidden_features,  # 120,
+                                                      seed=seed,
+                                                      output_dir=output_dir,
+                                                      initial_pos={'bounds': _bounds,
+                                                                   'std': _stds,
+                                                                   },
+                                                      normalize=False,
+                                                      regularize=True,
+                                                      NDE_prior=_prior_NDE)
+        NDE_theta.build(
+            Y_train,
+            X_train,
+            filterset=gama_filters,
+            optimizer='adam')
+        NDE_theta.load_validation_data(X_vali)
+        NDE_theta.bounds = speculator.bounds
+        NDE_theta.params_name = speculator.params_name
+        NDE_theta.external_redshift_data = None  # z_nsa
 
-    max_epochs = 6
-    # blurs = [0.2, 0.1, 0.1, 0.1, 0.1]
-    blurs = [0.3, 0.2, 0.1, 0.1, 0.05, 0.05]
+        print('Total number of params in the model:',
+              sum(p.numel() for p in NDE_theta.net.parameters() if p.requires_grad))
 
-    try:
-        print('### Training NDE for seed {0}'.format(seed))
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
-                                                        max_lr=8e-4,
-                                                        steps_per_epoch=100,
-                                                        epochs=max_epochs)
-        for i, epoch in enumerate(range(max_epochs)):
-            print('    Epoch {0}'.format(epoch))
-            print('    lr:', NDE_theta.optimizer.param_groups[0]['lr'])
-            NDE_theta.train(n_epochs=100,
-                            speculator=speculator,
-                            add_penalty=add_penalty,
-                            noise=noise, noise_model_dir=noise_model_dir,
-                            sinkhorn_kwargs={
-                                'p': 1, 'blur': blurs[i], 'scaling': 0.5},
-                            scheduler=scheduler
-                            )
-        print(f'    Succeeded in training for {max_epochs} epochs!')
-        print('    Saving NDE model for seed {0}'.format(seed))
-        print('\n\n')
-        NDE_theta.save_model(
-            os.path.join(NDE_theta.output_dir,
-                         f'nde_theta_last_model_{NDE_theta.method}_{NDE_theta.seed}.pkl')
-        )
-    except Exception as e:
-        print(e)
+        max_epochs = 6
+        blurs = [0.3, 0.2, 0.1, 0.1, 0.1, 0.1]
+        # blurs = [0.3, 0.2, 0.1, 0.1, 0.05, 0.05]
+
+        try:
+            print('### Training NDE for seed {0}'.format(seed))
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
+                                                            max_lr=8e-4,
+                                                            steps_per_epoch=100,
+                                                            epochs=max_epochs)
+            for i, epoch in enumerate(range(max_epochs)):
+                print('    Epoch {0}'.format(epoch))
+                print('    lr:', NDE_theta.optimizer.param_groups[0]['lr'])
+                NDE_theta.train(n_epochs=100,
+                                speculator=speculator,
+                                add_penalty=add_penalty,
+                                noise=noise, noise_model_dir=noise_model_dir,
+                                sinkhorn_kwargs={
+                                    'p': 1, 'blur': blurs[i], 'scaling': 0.5},
+                                scheduler=scheduler
+                                )
+            print(f'    Succeeded in training for {max_epochs} epochs!')
+            print('    Saving NDE model for seed {0}'.format(seed))
+            print('\n\n')
+            NDE_theta.save_model(
+                os.path.join(NDE_theta.output_dir,
+                             f'nde_theta_last_model_{NDE_theta.method}_{NDE_theta.seed}.pkl')
+            )
+        except Exception as e:
+            print(e)
 
 
 if __name__ == '__main__':
