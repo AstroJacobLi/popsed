@@ -1,4 +1,6 @@
 # Adapted from PROVABGS: https://github.com/changhoonhahn/provabgs
+# src/provabgs/infer.py
+
 import os
 import h5py
 import numpy as np
@@ -69,7 +71,7 @@ class FlatDirichletPrior(Prior):
 
         Reference
         ---------
-        * Betancourt(2013) - https://arxiv.org/pdf/1010.3436.pdf
+        * Betancourt (2013) - https://arxiv.org/pdf/1010.3436.pdf
         '''
         assert tt.shape[-1] == self.ndim_sampling
         tt_d = np.empty(tt.shape[:-1] + (self.ndim,))

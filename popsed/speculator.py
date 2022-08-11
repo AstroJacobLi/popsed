@@ -1025,8 +1025,72 @@ class Speculator():
             redshift = torch.zeros_like(params[:, 0:1])
         return self._predict_mag_with_mass_redshift(torch.hstack([params, log_stellar_mass, redshift]).to(self.device), **kwargs)
 
+    def _add_photometry_noise(self, maggies, is_maggies=True,
+                              noise=None, noise_model_dir=None, SNR=10):
+        """
+        Add noise to the photometry.
+
+        Parameters
+        ----------
+        maggies: torch.Tensor. 
+            The predicted noise-free photometry in maggies or magnitude, shape = (n_samples, n_bands).
+        is_maggies: bool.
+            Whether the input maggies are in maggies or magnitude. If True, the input is in maggies.
+        nosie: str.
+            Whether to add noise to the predicted photometry.
+
+            |  If ``noise=None``, no noise is added.
+            |  If ``noise='nsa'`` or ``noise='gama'``, we add noise according to your noise model.
+            |  If ``noise='snr'``, we add noise with constant SNR. Therefore, SNR must be provided.
+        noise_model_dir: str.
+            The directory of the noise model. Only works if ``noise='nsa'`` or ``noise='gama'``.
+        SNR: float.
+            The signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry).
+            Only works if `noise='snr'`.
+
+        Returns
+        -------
+        maggies: torch.Tensor.
+            The predicted photometry with noise, shape = (n_samples, n_bands).
+            If ``is_maggies`` is True, the output is in maggies. Otherwise, the output is in magnitude.
+        """
+        if not is_maggies:  # the input maggies is actually magnitudes.
+            maggies = 10**(-0.4 * maggies)
+        if noise == 'nsa' or noise == 'gama':
+            # Add noise based on NSA noise model.
+            self._parse_noise_model(noise_model_dir)
+            mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
+            _sigs_mags = torch.zeros_like(mags)
+            _sig_flux = torch.zeros_like(mags)
+            for i in range(maggies.shape[1]):
+                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
+                    0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+                _sig_flux[:, i] = utils.sigma_mag2flux(
+                    _sigs_mags[:, i], mags[:, i])  # in nanomaggies
+            _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
+            _noise[(maggies + _noise) < 0] = 0.0
+            maggies += _noise
+
+        elif noise == 'snr':
+            # Add noise with constant SNR.
+            _noise = torch.randn_like(maggies) * maggies / SNR
+            _noise[(maggies + _noise) < 0] = 0.0
+            maggies += _noise
+
+        elif noise == None:
+            pass
+        else:
+            raise ValueError(
+                'The noise model should be one of ["nsa", "gama", "snr", None]')
+
+        if not is_maggies:  # also return magnitudes
+            return -2.5 * torch.log10(maggies)
+        else:
+            return maggies
+
     def _predict_mag_with_mass_redshift(self, params,
-                                        filterset: list = ['sdss2010-{0}'.format(b) for b in 'ugriz'],
+                                        filterset: list = [
+                                            'sdss2010-{0}'.format(b) for b in 'ugriz'],
                                         noise=None, noise_model_dir='./noise_model/nsa_noise_model_mag.npy', SNR=10):
         """
         Predict corresponding photometry (in magnitude), given SPS physical parameters.
@@ -1089,33 +1153,9 @@ class Speculator():
         maggies = torch.trapezoid(
             ((self.wave_obs * _spec)[:, None, :] * self.transmission_effiency[None, :, :]
              ), self.wave_obs) / self.ab_zero_counts
-
-        if noise == 'nsa' or noise == 'gama':
-            # Add noise based on NSA noise model.
-            self._parse_noise_model(noise_model_dir)
-            mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
-            _sigs_mags = torch.zeros_like(mags)
-            _sig_flux = torch.zeros_like(mags)
-            for i in range(maggies.shape[1]):
-                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
-                    0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
-                _sig_flux[:, i] = utils.sigma_mag2flux(
-                    _sigs_mags[:, i], mags[:, i])  # in nanomaggies
-            _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
-            _noise[(maggies + _noise) < 0] = 0.0
-            return -2.5 * torch.log10(maggies + _noise)
-
-        elif noise == 'snr':
-            # Add noise with constant SNR.
-            _noise = torch.randn_like(maggies) * maggies / SNR
-            _noise[(maggies + _noise) < 0] = 0.0
-            maggies += _noise
-
-        elif noise == None:
-            pass
-        else:
-            raise ValueError(
-                'The noise model should be either nsa or gama or snr or None')
+        maggies[maggies <= 0.] = 1e-15
+        maggies = self._add_photometry_noise(
+            maggies, noise=noise, noise_model_dir=noise_model_dir, SNR=SNR)
 
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(maggies)
@@ -1305,6 +1345,68 @@ class SuperSpeculator(Speculator):
 
     #     return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass]).to(self.device),
     #                                                  external_redshift=redshift)
+    def _add_photometry_noise(self, maggies, is_maggies=True,
+                              noise=None, noise_model_dir=None, SNR=10):
+        """
+        Add noise to the photometry.
+
+        Parameters
+        ----------
+        maggies: torch.Tensor. 
+            The predicted noise-free photometry in maggies or magnitude, shape = (n_samples, n_bands).
+        is_maggies: bool.
+            Whether the input maggies are in maggies or magnitude. If True, the input is in maggies.
+        nosie: str.
+            Whether to add noise to the predicted photometry.
+
+            |  If ``noise=None``, no noise is added.
+            |  If ``noise='nsa'`` or ``noise='gama'``, we add noise according to your noise model.
+            |  If ``noise='snr'``, we add noise with constant SNR. Therefore, SNR must be provided.
+        noise_model_dir: str.
+            The directory of the noise model. Only works if ``noise='nsa'`` or ``noise='gama'``.
+        SNR: float.
+            The signal-to-noise ratio in maggies, default = 10 (results in ~0.1 mag noise in photometry).
+            Only works if `noise='snr'`.
+
+        Returns
+        -------
+        maggies: torch.Tensor.
+            The predicted photometry with noise, shape = (n_samples, n_bands).
+            If ``is_maggies`` is True, the output is in maggies. Otherwise, the output is in magnitude.
+        """
+        if not is_maggies:  # the input maggies is actually magnitudes.
+            maggies = 10**(-0.4 * maggies)
+        if noise == 'nsa' or noise == 'gama':
+            # Add noise based on NSA noise model.
+            self._parse_noise_model(noise_model_dir)
+            mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
+            _sigs_mags = torch.zeros_like(mags)
+            _sig_flux = torch.zeros_like(mags)
+            for i in range(maggies.shape[1]):
+                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
+                    0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+                _sig_flux[:, i] = utils.sigma_mag2flux(
+                    _sigs_mags[:, i], mags[:, i])  # in nanomaggies
+            _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
+            _noise[(maggies + _noise) < 0] = 0.0
+            maggies = maggies.clone() + _noise
+
+        elif noise == 'snr':
+            # Add noise with constant SNR.
+            _noise = torch.randn_like(maggies) * maggies / SNR
+            _noise[(maggies + _noise) < 0] = 0.0
+            maggies += _noise
+
+        elif noise == None:
+            pass
+        else:
+            raise ValueError(
+                'The noise model should be one of ["nsa", "gama", "snr", None]')
+
+        if not is_maggies:  # also return magnitudes
+            return -2.5 * torch.log10(maggies)
+        else:
+            return maggies
 
     def _predict_mag_with_mass_redshift(self, params,
                                         external_redshift=None,
@@ -1377,32 +1479,8 @@ class SuperSpeculator(Speculator):
 
         maggies[maggies <= 0.] = 1e-15
 
-        if noise == 'nsa' or noise == 'gama':
-            # Add noise based on NSA noise model.
-            self._parse_noise_model(noise_model_dir)
-            mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
-            _sigs_mags = torch.zeros_like(mags)
-            _sig_flux = torch.zeros_like(mags)
-            for i in range(maggies.shape[1]):
-                _sigs_mags[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
-                    0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
-                _sig_flux[:, i] = utils.sigma_mag2flux(
-                    _sigs_mags[:, i], mags[:, i])  # in nanomaggies
-            _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
-            _noise[(maggies + _noise) < 0] = 0.0
-            return -2.5 * torch.log10(maggies + _noise)
-
-        elif noise == 'snr':
-            # Add noise with constant SNR.
-            _noise = torch.randn_like(maggies) * maggies / SNR
-            _noise[(maggies + _noise) < 0] = 0.0
-            maggies += _noise
-
-        elif noise == None:
-            pass
-        else:
-            raise ValueError(
-                'The noise model should be either nsa or gama or snr or None')
+        maggies = self._add_photometry_noise(
+            maggies, noise=noise, noise_model_dir=noise_model_dir, SNR=SNR)
 
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(maggies)

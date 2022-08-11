@@ -779,8 +779,130 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         X = X.to('cpu')
         gc.collect()
         torch.cuda.empty_cache()
-        # Y.to('cpu')
-        # loss_fn(X, Y)# penalty +
+
+        return loss, penalty  # torch.zeros_like(loss)  # penalty
+
+    def _get_loss_NMF_new(self, X, speculator, n_samples,
+                          noise, SNR, noise_model_dir,
+                          loss_fn, add_penalty=False, regularize=False):
+        """
+        The most important function for WassersteinNeuralDensityEstimator. 
+        This defines the loss function for the NMF-based SPS model.
+        This function only works for NMF-based SPS.
+
+        Parameters
+        ----------
+        X: torch.Tensor. 
+            The observed photometry data (after being z-scored in :py:meth:`build`). 
+        speculator: ``SuperSpeculator`` class.  
+            SED emulator, used to generate the synthetic photometry.
+        n_samples: int. 
+            The number of samples to use. Recommended to be 5000-10000 (depends on your GPU memory).
+        noise: float. 
+            The noise model. You can choose from ``'snr', 'nsa', 'gama', None``. 
+            If 'snr', you also need to provide the SNR argument.
+            If ``'nsa', 'gama'``, you also need to provide the ``noise_model_dir`` argument.
+        SNR: float. 
+            The signal-to-noise ratio to use if noise is ``'snr'``.
+        noise_model_dir: str. 
+            The directory of the noise model.
+        loss_fn: torch function. 
+            The loss function to use. Here we use Wasserstein loss from ``geomloss``.
+        add_penalty: bool. 
+            Whether adding the penalty term to the loss.
+        regularize: bool. 
+            Whether the SED params are CDF-transformed.
+
+        Returns
+        -------
+        loss: torch.Tensor. 
+            The Wasserstein loss between data and synthetic photometry.
+        penalty: torch.Tensor.  
+            This can be the fraction of bad photometry, or the user-defined penalty term.
+        """
+        assert noise in [None, 'snr', 'gama',
+                         'nsa'], 'Only support `snr`, `nsa`, `gama`, or `None` now.'
+
+        if regularize:
+            if hasattr(self, "cdf_z") and self.cdf_z is not None:
+                sample = inverse_transform_nmf_params_given_z(
+                    self.sample(n_samples), self.NDE_prior, self.cdf_z)
+            elif hasattr(self, "cdf_mass") and self.cdf_mass is not None:
+                sample = inverse_transform_nmf_params_given_mass(
+                    self.sample(n_samples), self.NDE_prior, self.cdf_mass)
+            else:
+                sample = inverse_transform_nmf_params(
+                    self.sample(n_samples), self.NDE_prior)
+                sample[:, 1:2] = _inv_beta_cdf(sample[:, 1:2], 3, 1)
+                sample[:, 2:3] = _inv_beta_cdf(sample[:, 2:3], 2, 1)
+                sample[:, 3:4] = _inv_beta_cdf(sample[:, 3:4], 1, 1)
+        else:
+            sample = self.sample(n_samples)
+
+        if hasattr(self, 'anpe_mass_given_z') and self.anpe_mass_given_z is not None:
+            # with torch.no_grad():
+            sample = torch.hstack(
+                [sample, self.anpe_mass_given_z.sample(1, context=sample[:, -1:])[:, 0]])
+
+        if hasattr(self, 'anpe_mass_given_all') and self.anpe_mass_given_all is not None:
+            # with torch.no_grad():
+            sample = torch.hstack(
+                [sample, self.anpe_mass_given_all.sample(1, context=sample[:, :])[:, 0]])
+
+        # if self.external_redshift_data is not None:
+        #     _z = torch.Tensor(np.random.choice(self.external_redshift_data, n_samples)[
+        #         :, None]).to(self.device)
+        #     sample = torch.hstack([sample[:, :-1], _z, sample[:, -1:]])
+
+        # penalty term
+        # powers = torch.Tensor(self.penalty_powers).to(self.device)
+        # penalty = log_prior(sample,
+        #                     torch.Tensor(self.NDE_prior).to(self.device),
+        #                     powers)
+        # # print('Number of inf:', torch.isinf(penalty).sum())
+        # penalty = penalty[~torch.isinf(penalty)].nanmean()
+
+        Y = speculator._predict_mag_with_mass_redshift(
+            sample, filterset=self.filterset,
+            noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+        if self.z_score:
+            Y = self.scaler.transform(
+                Y,
+                device=self.device
+            )
+        bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
+            :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
+        bad_mask |= (torch.isnan(Y).any(axis=1) |
+                     torch.isinf(Y).any(axis=1))
+        Y = Y[~bad_mask]
+        # print('Bad mask num', bad_mask.sum())
+        # penalty = torch.sum(Y[:, 2] > (19.65 - self.scaler.mean[2]) / self.scaler.std[2]) / len(Y) * 10
+        penalty = torch.sum(Y[:, 2] > 19.65) / len(Y) * 10
+
+        # add noise to real data too
+        X = speculator._add_photometry_noise(
+            X, is_maggies=False, noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+        dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
+        data_loss = 0.
+        for x in dataloader:
+            data_loss += loss_fn(Y, x.to(self.device))
+
+        loss = data_loss / len(dataloader)  # + penalty
+        # loss = loss_fn(Y, X)
+
+        if add_penalty:
+            # loss += loss_fn((1 * (X[:100, 2:3].clone() - 19.65)), (1 * (Y[:100, 2:3].clone() - 19.65)))
+            loss += loss_fn(10**(1 * (X[:, 2:3].clone() - 19.65)),
+                            10**(1 * (Y[:, 2:3].clone() - 19.65)))
+
+        sample = None
+        x = None
+        y = None
+        Y = None
+        dataloader = None
+        X = X.to('cpu')
+        gc.collect()
+        torch.cuda.empty_cache()
 
         return loss, penalty  # torch.zeros_like(loss)  # penalty
 
@@ -848,9 +970,12 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             # n_samples = len(X_train)
             # aggr_loss = 0
             # for i in range(3):
-            loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
-                                                 noise, SNR, noise_model_dir, L,
-                                                 add_penalty=add_penalty, regularize=self.regularize)
+            # loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
+            #                                      noise, SNR, noise_model_dir, L,
+            #                                      add_penalty=add_penalty, regularize=self.regularize)
+            loss, bad_ratio = self._get_loss_NMF_new(X_train, speculator, n_samples,
+                                                     noise, SNR, noise_model_dir, L,
+                                                     add_penalty=add_penalty, regularize=self.regularize)
             #     aggr_loss += loss
             # aggr_loss /= 3
             # aggr_loss.backward()
@@ -1118,6 +1243,34 @@ def _inv_gaussian_cdf(x, mu, sigma):
         return mu + sigma * np.sqrt(2) * erfinv(2 * x - 1)
 
 
+def _beta_cdf(x, a, b):
+    """
+    CDF of a beta distribution.
+    """
+    from torchinterp1d import Interp1d
+    from scipy.special import betainc
+
+    if torch.is_tensor(x):
+        u = torch.linspace(0, 15, 10000)
+        return Interp1d()(u, torch.Tensor(betainc(a, b, u)), x.clone())
+    else:
+        return betainc(a, b, x)
+
+
+def _inv_beta_cdf(x, a, b):
+    """
+    Inverse CDF of a beta distribution.
+    """
+    from torchinterp1d import Interp1d
+    from scipy.special import betaincinv
+
+    if torch.is_tensor(x):
+        u = torch.linspace(0, 1, 10000).to(x.device.type)
+        return Interp1d()(u, torch.Tensor(betaincinv(a, b, u.cpu().numpy())).to(x.device.type), x.clone())
+    else:
+        return betaincinv(a, b, x)
+
+
 def cdf_transform(x, bounds):
     """
     Transform from a Gaussian (which is x) to a Uniform with bounds as input.
@@ -1157,12 +1310,14 @@ def inverse_transform_nmf_params(params, bounds):
     for i in range(_params.shape[1]):
         _params[:, i:i +
                 1] = cdf_transform(_params[:, i:i + 1].clone(), bounds[i])
+        if i <= 2:
+            _params[:, i:i + 1] = _inv_beta_cdf(_params[:, i:i + 1], 3 - i, 1)
     return _params
 
 
 def transform_nmf_params_given_z(params, bounds, cdf_z):
     """
-    Transform (i.e., regularize) SED parameters. 
+    Transform (i.e., regularize) SED parameters.
     This might help with the interpretation of the prior.
 
     Here the bounds is literally the bounds of the tophat prior in real parameter space.
@@ -1178,7 +1333,7 @@ def transform_nmf_params_given_z(params, bounds, cdf_z):
 
 def transform_nmf_params_given_mass(params, bounds, cdf_mass):
     """
-    Transform (i.e., regularize) SED parameters. 
+    Transform (i.e., regularize) SED parameters.
     This might help with the interpretation of the prior.
 
     Here the bounds is literally the bounds of the tophat prior in real parameter space.
