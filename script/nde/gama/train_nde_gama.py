@@ -4,6 +4,7 @@ Using CDF transform
 Use GAMA DR3 aperture matched photometry.
 """
 import os
+os.environ['CUDA_PATH'] = '/usr/local/cuda-10.2'
 import sys
 import pickle
 import corner
@@ -45,9 +46,6 @@ speculator._calc_transmission(gama_filters)
 # gama_filters = ['sdss_{0}0'.format(b) for b in 'ugriz']# + ['VIKING_{0}'.format(b) for b in ['Y']]
 # speculator._calc_transmission(gama_filters, filter_dir='./filters/gama/')
 
-noise = None  # 'snr'  # 'gama'
-noise_model_dir = './noise_model/gama_noise_model_mag_dr3_apmatch.npy'
-
 # Load NSA data
 mags_gama = np.load(
     './reference_catalog/GAMA/gama_clean_mag_dr3_apmatch.npy')[:, :5]
@@ -78,10 +76,17 @@ _prior_NDE[-1] = np.array([7.5, 13])
 
 
 def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transforms=5,
-               num_bins=40, hidden_features=100,
+               num_bins=40, hidden_features=100, add_noise=False, smallblur=False,
                add_penalty=False, output_dir='./NDE/GAMA/{name}/nde_theta_{name}_DR3/'):
     # Start train NDEs
     from popsed.nde import WassersteinNeuralDensityEstimator
+
+    if add_noise:
+        noise = 'gama'  # 'snr'  # 'gama'
+    else:
+        noise = None
+
+    noise_model_dir = './noise_model/gama_noise_model_mag_dr3_apmatch.npy'
 
     if multijobs == False:
         seed_range = trange(seed_low, seed_high)
@@ -128,7 +133,10 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
               sum(p.numel() for p in NDE_theta.net.parameters() if p.requires_grad))
 
         max_epochs = 6
-        blurs = [0.3, 0.2, 0.1, 0.1, 0.1, 0.1]
+        if smallblur:
+            blurs = [0.3, 0.2, 0.1, 0.1, 0.05, 0.05]
+        else:
+            blurs = [0.3, 0.2, 0.1, 0.1, 0.1, 0.1]
         # blurs = [0.3, 0.2, 0.1, 0.1, 0.05, 0.05]
 
         try:
