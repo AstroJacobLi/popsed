@@ -833,9 +833,6 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             else:
                 sample = inverse_transform_nmf_params(
                     self.sample(n_samples), self.NDE_prior)
-                sample[:, 1:2] = _inv_beta_cdf(sample[:, 1:2], 3, 1)
-                sample[:, 2:3] = _inv_beta_cdf(sample[:, 2:3], 2, 1)
-                sample[:, 3:4] = _inv_beta_cdf(sample[:, 3:4], 1, 1)
         else:
             sample = self.sample(n_samples)
 
@@ -849,10 +846,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             sample = torch.hstack(
                 [sample, self.anpe_mass_given_all.sample(1, context=sample[:, :])[:, 0]])
 
-        # if self.external_redshift_data is not None:
-        #     _z = torch.Tensor(np.random.choice(self.external_redshift_data, n_samples)[
-        #         :, None]).to(self.device)
-        #     sample = torch.hstack([sample[:, :-1], _z, sample[:, -1:]])
+        if self.external_redshift_data is not None:
+            _z = torch.Tensor(np.random.choice(self.external_redshift_data, n_samples)[
+                :, None]).to(self.device)
+            sample = torch.hstack([sample[:, :-1], _z, sample[:, -1:]])
 
         # penalty term
         # powers = torch.Tensor(self.penalty_powers).to(self.device)
@@ -880,8 +877,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         penalty = torch.sum(Y[:, 2] > 19.65) / len(Y) * 10
 
         # add noise to real data too
-        X = speculator._add_photometry_noise(
-            X, is_maggies=False, noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+        # X = speculator._add_photometry_noise(
+        #     X, is_maggies=False, noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
         dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
         data_loss = 0.
         for x in dataloader:
@@ -986,9 +983,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             self.train_loss_history.append(loss.item())
 
             # get validation loss
-            vali_loss, _ = self._get_loss_NMF(self.X_vali, speculator, n_samples,  # len(self.X_vali),
-                                              noise, SNR, noise_model_dir, L,
-                                              add_penalty, regularize=self.regularize)
+            vali_loss, _ = self._get_loss_NMF_new(self.X_vali, speculator, n_samples,  # len(self.X_vali),
+                                                  noise, SNR, noise_model_dir, L,
+                                                  add_penalty, regularize=self.regularize)
             self.vali_loss_history.append(vali_loss.item())
 
             t.set_description(

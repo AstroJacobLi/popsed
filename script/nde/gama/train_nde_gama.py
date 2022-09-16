@@ -24,21 +24,32 @@ popsed.set_matplotlib(style='JL', usetex=False, dpi=80)
 from popsed import prior
 
 
-name = 'NMF'
+name = 'NMF_ZH'
 wave = np.load(f'./train_sed_{name}/{name.lower()}_seds/fsps.wavelength.npy')
+
+if name == 'NMF_ZH':
+    spec_dir = [
+        f'./train_sed_{name}/best_emu/speculator_best_recon_model_{name}_{i_bin}.pkl' for i_bin in range(0, 5)]
+    params_name = ['kappa1_sfh', 'kappa2_sfh', 'kappa3_sfh',
+                   'fburst', 'tburst', 'gamma1_zh', 'gamma2_zh',
+                   'dust1', 'dust2',
+                   'dust_index', 'redshift', 'logm']
+else:
+    spec_dir = [
+        f'./train_sed_{name}/best_emu/speculator_best_recon_model_{name}.emu_{i_bin}.pkl' for i_bin in range(0, 5)]
+    params_name = ['kappa1_sfh', 'kappa2_sfh', 'kappa3_sfh',
+                   'fburst', 'tburst', 'logzsol',
+                   'dust1', 'dust2',
+                   'dust_index', 'redshift', 'logm']
 speculator = SuperSpeculator(
-    speculators_dir=[
-        f'./train_sed_{name}/best_emu/speculator_best_recon_model_{name}.emu_{i_bin}.pkl' for i_bin in range(0, 5)],
+    speculators_dir=spec_dir,
     str_wbin=['.w1000_2000',
               '.w2000_3600',
               '.w3600_5500',
               '.w5500_7410',
               '.w7410_60000'],
     wavelength=wave,
-    params_name=['kappa1_sfh', 'kappa2_sfh', 'kappa3_sfh',
-                 'fburst', 'tburst', 'logzsol',
-                 'dust1', 'dust2',
-                 'dust_index', 'redshift', 'logm'],
+    params_name=params_name,
     device='cuda', use_speclite=True)
 # + ['VIKING_{0}'.format(b) for b in ['Y']]
 gama_filters = ['sdss2010-{0}'.format(b) for b in 'ugriz']
