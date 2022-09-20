@@ -953,7 +953,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         L = SamplesLoss(loss="sinkhorn", **sinkhorn_kwargs)
 
         # learning rate
-        if scheduler is not None:
+        if scheduler is None:
             self.optimizer.param_groups[0]['lr'] = lr
 
         t = trange(n_epochs,
