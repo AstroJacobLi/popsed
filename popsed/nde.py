@@ -894,10 +894,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         sample = None
         x = None
-        y = None
         Y = None
         dataloader = None
         X = X.to('cpu')
+        del x, Y, dataloader, X
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -964,21 +964,20 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             self.optimizer.zero_grad()
             X_train, _ = train_test_split(
                 self.X.detach(), test_size=0.2, shuffle=True)
-            # n_samples = len(X_train)
-            # aggr_loss = 0
-            # for i in range(3):
-            # loss, bad_ratio = self._get_loss_NMF(X_train, speculator, n_samples,
-            #                                      noise, SNR, noise_model_dir, L,
-            #                                      add_penalty=add_penalty, regularize=self.regularize)
+
             loss, bad_ratio = self._get_loss_NMF_new(X_train, speculator, n_samples,
                                                      noise, SNR, noise_model_dir, L,
                                                      add_penalty=add_penalty, regularize=self.regularize)
-            #     aggr_loss += loss
-            # aggr_loss /= 3
-            # aggr_loss.backward()
-            # t.set_description(
-            #     f'Loss = {loss.item():.3f} (train), {bad_ratio.item():.3f} (bad ratio)')
             loss.backward()
+            # loss = 0
+            # for i in range(3):
+            #     sub_loss, bad_ratio = self._get_loss_NMF_new(X_train, speculator, n_samples,
+            #                                                  noise, SNR, noise_model_dir, L,
+            #                                                  add_penalty=add_penalty, regularize=self.regularize)
+            #     loss += sub_loss
+            # loss /= 3
+            # loss.backward()
+
             self.optimizer.step()
             self.train_loss_history.append(loss.item())
 
@@ -1005,6 +1004,8 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
                         os.path.join(self.output_dir,
                                      f'nde_theta_best_loss_{self.method}_{self.seed}.pkl')
                     )
+
+            # print(self.optimizer.param_groups[0]['lr'])
             if scheduler is not None:
                 scheduler.step()
 

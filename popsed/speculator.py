@@ -1069,7 +1069,7 @@ class Speculator():
                     _sigs_mags[:, i], mags[:, i])  # in nanomaggies
             _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
             _noise[(maggies + _noise) < 0] = 0.0
-            maggies += _noise
+            maggies += _noise / SNR
 
         elif noise == 'snr':
             # Add noise with constant SNR.
@@ -1389,14 +1389,24 @@ class SuperSpeculator(Speculator):
                     _sigs_mags[:, i], mags[:, i])  # in nanomaggies
             _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
             _noise[(maggies + _noise) < 0] = 0.0
-            maggies = maggies.clone() + _noise
+            maggies = maggies.clone() + _noise / SNR
+        elif noise == 'gama_lambdar':
+            self._parse_noise_model(noise_model_dir)
 
+            mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
+            _snrs = torch.zeros_like(mags)
+            _sig_flux = torch.zeros_like(mags)
+            for i in range(maggies.shape[1]):
+                _snrs[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
+                    0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+            _noise = maggies / _snrs * torch.randn_like(mags)
+            _noise[(maggies + _noise) < 0] = 0.0
+            maggies = maggies.clone() + _noise / SNR
         elif noise == 'snr':
             # Add noise with constant SNR.
             _noise = torch.randn_like(maggies) * maggies / SNR
             _noise[(maggies + _noise) < 0] = 0.0
             maggies += _noise
-
         elif noise == None:
             pass
         else:
