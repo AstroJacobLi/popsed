@@ -64,21 +64,29 @@ torch.cuda.empty_cache()
 
 # Determine the intrinsic sampling loss
 X_datas = []
-for i in range(2):
+for i in range(5):
     ind = np.random.randint(0, len(X_data), 10000)
     X_datas.append(torch.Tensor(X_data[ind]).to('cuda'))
-
+from torch.utils.data import DataLoader
 from geomloss import SamplesLoss
 L = SamplesLoss(loss='sinkhorn', **{'p': 1, 'blur': 0.002, 'scaling': 0.9})
-intr_loss = L(X_datas[0], X_datas[1]).item()
-print("Intrinsic sampling loss:", intr_loss)
+intr_loss = []
+for i in range(5):
+    dataloader = DataLoader(X_data, batch_size=10000, shuffle=True)
+    data_loss = 0.
+    for x in dataloader:
+        data_loss += L(X_datas[i], x.to('cuda'))
+    loss = data_loss / len(dataloader)
+    intr_loss.append(loss.item())
+
+print("Intrinsic sampling loss:", np.mean(intr_loss), '+-', np.std(intr_loss))
 del X_datas
 gc.collect()
 torch.cuda.empty_cache()
 
 _prior_NDE = speculator.bounds.copy()
-_prior_NDE[-2] = np.array([0., 0.65])
-_prior_NDE[-1] = np.array([7.5, 12.5])
+_prior_NDE[-2] = np.array([0., 0.8])
+_prior_NDE[-1] = np.array([7.5, 13.])
 # _prior_NDE[-4] = np.array([0., 2.0])  # dust_2
 
 
@@ -102,13 +110,14 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
         seed_range = [int(os.environ["SLURM_ARRAY_TASK_ID"])]
         print('Seed range:', seed_range)
     for seed in seed_range:
+        np.random.seed(seed)
         _bounds = np.zeros_like(speculator.bounds)
         _bounds = np.zeros_like(_bounds)
-        _bounds = np.vstack([-np.abs(np.random.normal(size=len(_bounds)) / 20),
-                            np.abs(np.random.normal(size=len(_bounds)) / 20)]).T
+        _bounds = np.vstack([-np.abs(np.random.normal(size=len(_bounds)) / 10),
+                            np.abs(np.random.normal(size=len(_bounds)) / 10)]).T
         _stds = np.ones(len(_bounds))
 
-        X_train, X_vali = train_test_split(X_data, test_size=0.05)
+        X_train, X_vali = train_test_split(X_data, test_size=0.15)
         if name == 'NMF_ZH':
             Y_train = torch.ones(len(X_train), 12)
         else:
@@ -130,6 +139,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
         NDE_theta.build(
             Y_train,
             X_train,
+            z_score=True,
             filterset=gama_filters,
             optimizer='adam')
         NDE_theta.load_validation_data(X_vali)
@@ -141,7 +151,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
               sum(p.numel() for p in NDE_theta.net.parameters() if p.requires_grad))
 
         max_epochs = max_epochs
-        blurs = [0.3, 0.2, 0.1, 0.1,
+        blurs = [0.3, 0.3, 0.2, 0.2, 0.1, 0.1,
                  0.1, 0.05, 0.05, 0.05] + [0.002] * max_epochs
         snrs = [1 + anneal_coeff * np.exp(- anneal_tau / max_epochs * i)
                 for i in range(max_epochs)]  # larger anneal_coeff, after annealing
@@ -152,7 +162,8 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
             scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
                                                             max_lr=max_lr,
                                                             steps_per_epoch=steps,
-                                                            epochs=max_epochs)
+                                                            epochs=max_epochs,
+                                                            div_factor=10, final_div_factor=100)
             for i, epoch in enumerate(range(max_epochs)):
                 np.save(os.path.join(NDE_theta.output_dir, f'{NDE_theta.method}_{NDE_theta.seed}_sample_{i+1}.npy'),
                         NDE_theta.sample(5000).detach().cpu().numpy())
@@ -188,4 +199,5 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
 if __name__ == '__main__':
     fire.Fire(train_NDEs)
 
-# python train_nde_mock.py --seed_low=0 --seed_high=1 --n_samples=10000 --num_transforms=20 --num_bins=40 --hidden_features=100 --max_lr=3e-4 --output_dir=./NDE/GAMA/anneal/mock/lr3e-4_exp0p25/
+# python train_nde_mock.py --seed_low=0 --seed_high=1 --n_samples=10000 --num_transforms=20 --num_bins=50 --hidden_features=100 --max_lr=3e-4 --output_dir=./NDE/GAMA/anneal/mock/lr3e-4_exp0p25/
+# python train_nde_mock.py --multijobs=False --seed_low=0 --seed_high=1 --n_samples=10000 --num_transforms=20 --num_bins=50 --hidden_features=100 --output_dir=./NDE/GAMA/anneal/mock2/lr3e-4_ann7p5/ --add_noise=True --max_lr=0.0003 --max_epochs=30 --anneal_coeff=20 --anneal_tau=7.5

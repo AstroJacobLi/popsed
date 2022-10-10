@@ -55,7 +55,8 @@ gama_filters = ['sdss2010-{0}'.format(b) for b in 'ugriz']
 speculator._calc_transmission(gama_filters)
 
 # Load NSA data
-X_data = np.load('./reference_catalog/GAMA/gama_clean_mag_lambdar.npy')[:, :5]
+X_data = np.load(
+    './reference_catalog/GAMA/gama_clean_mag_dr3_apmatch.npy')[:, :5]
 print('Total number of samples:', len(X_data))
 
 import gc
@@ -64,21 +65,29 @@ torch.cuda.empty_cache()
 
 # Determine the intrinsic sampling loss
 X_datas = []
-for i in range(2):
+for i in range(5):
     ind = np.random.randint(0, len(X_data), 10000)
     X_datas.append(torch.Tensor(X_data[ind]).to('cuda'))
-
+from torch.utils.data import DataLoader
 from geomloss import SamplesLoss
 L = SamplesLoss(loss='sinkhorn', **{'p': 1, 'blur': 0.002, 'scaling': 0.9})
-intr_loss = L(X_datas[0], X_datas[1]).item()
-print("Intrinsic sampling loss:", intr_loss)
+intr_loss = []
+for i in range(5):
+    dataloader = DataLoader(X_data, batch_size=10000, shuffle=True)
+    data_loss = 0.
+    for x in dataloader:
+        data_loss += L(X_datas[i], x.to('cuda'))
+    loss = data_loss / len(dataloader)
+    intr_loss.append(loss.item())
+
+print("Intrinsic sampling loss:", np.mean(intr_loss), '+-', np.std(intr_loss))
 del X_datas
 gc.collect()
 torch.cuda.empty_cache()
 
 _prior_NDE = speculator.bounds.copy()
-_prior_NDE[-2] = np.array([0., 0.65])
-_prior_NDE[-1] = np.array([7.5, 12.5])
+_prior_NDE[-2] = np.array([0., 0.8])
+_prior_NDE[-1] = np.array([7.5, 13.0])
 # _prior_NDE[-4] = np.array([0., 2.0])  # dust_2
 
 
@@ -94,7 +103,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
     else:
         noise = None
 
-    noise_model_dir = './noise_model/gama_noise_model_mag_lambdar.npy'
+    noise_model_dir = './noise_model/gama_noise_model_mag_dr3_apmatch.npy'
 
     if multijobs == False:
         seed_range = trange(seed_low, seed_high)
@@ -104,8 +113,8 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
     for seed in seed_range:
         _bounds = np.zeros_like(speculator.bounds)
         _bounds = np.zeros_like(_bounds)
-        _bounds = np.vstack([-np.abs(np.random.normal(size=len(_bounds)) / 20),
-                            np.abs(np.random.normal(size=len(_bounds)) / 20)]).T
+        _bounds = np.vstack([-np.abs(np.random.normal(size=len(_bounds)) / 10),
+                            np.abs(np.random.normal(size=len(_bounds)) / 10)]).T
         _stds = np.ones(len(_bounds))
 
         X_train, X_vali = train_test_split(X_data, test_size=0.05)
@@ -130,6 +139,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
         NDE_theta.build(
             Y_train,
             X_train,
+            z_score=True,
             filterset=gama_filters,
             optimizer='adam')
         NDE_theta.load_validation_data(X_vali)
@@ -141,7 +151,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
               sum(p.numel() for p in NDE_theta.net.parameters() if p.requires_grad))
 
         max_epochs = max_epochs
-        blurs = [0.3, 0.2, 0.1, 0.1,
+        blurs = [0.3, 0.3, 0.2, 0.2, 0.1, 0.1,
                  0.1, 0.05, 0.05, 0.05] + [0.002] * max_epochs
         snrs = [1 + anneal_coeff * np.exp(- anneal_tau / max_epochs * i)
                 for i in range(max_epochs)]  # larger anneal_coeff, after annealing
@@ -152,7 +162,8 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
             scheduler = torch.optim.lr_scheduler.OneCycleLR(NDE_theta.optimizer,
                                                             max_lr=max_lr,
                                                             steps_per_epoch=steps,
-                                                            epochs=max_epochs)
+                                                            epochs=max_epochs,
+                                                            div_factor=10, final_div_factor=100)
             for i, epoch in enumerate(range(max_epochs)):
                 np.save(os.path.join(NDE_theta.output_dir, f'{NDE_theta.method}_{NDE_theta.seed}_sample_{i+1}.npy'),
                         NDE_theta.sample(5000).detach().cpu().numpy())
