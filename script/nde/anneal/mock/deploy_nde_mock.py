@@ -141,3 +141,5 @@ if __name__ == '__main__':
 # I think ann12_zscore_50e_10t is better at suppressing the high mass tail. So let's try less transforms and 40 epochs.
 # python deploy_nde_mock.py --output_dir='./NDE/GAMA/anneal/mock2/lr3e-4_ann12_zscore_40e_15t/' --seed_low=0 --seed_high=3 --num_bins=50 --num_transforms=15 --hidden_features=100 --max_lr=3e-4 --anneal_tau=12 --max_epochs=40
 # python deploy_nde_mock.py --output_dir='./NDE/GAMA/anneal/mock2/lr3e-4_ann12_zscore_40e_15t_60f/' --seed_low=0 --seed_high=3 --num_bins=50 --num_transforms=15 --hidden_features=60 --max_lr=3e-4 --anneal_tau=12 --max_epochs=40
+
+# python deploy_nde_mock.py --output_dir='./NDE/GAMA/anneal/mock2/lr3e-4_ann12_zscore_40e_20t_150f/' --seed_low=0 --seed_high=3 --num_bins=50 --num_transforms=20 --hidden_features=150 --max_lr=3e-4 --anneal_tau=12 --max_epochs=40
