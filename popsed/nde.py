@@ -606,6 +606,12 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         self.filterset = filterset
 
+        # self.noise_scaling = torch.rand(
+        #     1, requires_grad=True, device=self.device)
+        self.noise_scaling = torch.zeros(
+            [1], requires_grad=True, device=self.device)
+        # torch.nn.Parameter(torch.ones([1])).to(self.device)
+
     def load_validation_data(self, X_vali):
         """
         Load validation data.
@@ -624,163 +630,6 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             self.X_vali = X_vali.detach()
 
         self.X_vali = self.X_vali.to(self.device)
-
-    def _get_loss(self, X, speculator, n_samples,
-                  noise, SNR, noise_model_dir,
-                  loss_fn):
-        """
-        To be deprecated.
-        """
-        sample = self.sample(n_samples)
-        Y = self.scaler.transform(
-            speculator._predict_mag_with_mass_redshift(
-                sample, filterset=self.filterset,
-                noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
-        )
-        bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
-            :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
-        Y = Y[~bad_mask]
-        # Y = self.scaler.transform(
-        #     speculator._predict_mag_with_mass_redshift(
-        #         self.sample(n_samples), filterset=self.filterset,
-        #         noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
-        # )
-        # bad_mask = (torch.isnan(Y).any(dim=1) | torch.isinf(Y).any(dim=1))
-        # print('Bad mask num', bad_mask.sum())
-        # bad_ratio = bad_mask.sum() / len(Y)
-        # Y = Y[~bad_mask]
-        # val = 10.0
-        # Y = torch.nan_to_num(Y, val, posinf=val, neginf=-val)
-        # - torch.log10(1 - bad_ratio) / 10
-        powers = torch.Tensor(self.penalty_powers).to(self.device)
-        penalty = log_prior(sample,
-                            torch.Tensor(speculator.bounds).to(self.device), powers)
-        penalty = penalty[~torch.isinf(penalty)].mean()
-        loss = loss_fn(X, Y) + penalty
-        # print(penalty)
-        # loss = loss_fn(X, Y) - 10 * torch.log10(1 - bad_ratio) # bad_ratio * 5
-        # loss = torch.log10(loss_fn(X, Y)) + torch.log10(loss_fn(X[:, 1:4], Y[:, 1:4])) - torch.log10(1 - bad_ratio)
-        #+ torch.exp(5 * bad_ratio)
-
-        return loss, penalty
-
-    # def _get_loss_NMF(self, X, speculator, n_samples,
-    #                   noise, SNR, noise_model_dir,
-    #                   loss_fn, add_penalty=False, regularize=False):
-    #     """
-    #     The most important function for WassersteinNeuralDensityEstimator.
-    #     This defines the loss function for the NMF-based SPS model.
-    #     This function only works for NMF-based SPS.
-
-    #     Parameters
-    #     ----------
-    #     X: torch.Tensor.
-    #         The observed photometry data (after being z-scored in :py:meth:`build`).
-    #     speculator: ``SuperSpeculator`` class.
-    #         SED emulator, used to generate the synthetic photometry.
-    #     n_samples: int.
-    #         The number of samples to use. Recommended to be 5000-10000 (depends on your GPU memory).
-    #     noise: float.
-    #         The noise model. You can choose from ``'snr', 'nsa', 'gama', None``.
-    #         If 'snr', you also need to provide the SNR argument.
-    #         If ``'nsa', 'gama'``, you also need to provide the ``noise_model_dir`` argument.
-    #     SNR: float.
-    #         The signal-to-noise ratio to use if noise is ``'snr'``.
-    #     noise_model_dir: str.
-    #         The directory of the noise model.
-    #     loss_fn: torch function.
-    #         The loss function to use. Here we use Wasserstein loss from ``geomloss``.
-    #     add_penalty: bool.
-    #         Whether adding the penalty term to the loss.
-    #     regularize: bool.
-    #         Whether the SED params are CDF-transformed.
-
-    #     Returns
-    #     -------
-    #     loss: torch.Tensor.
-    #         The Wasserstein loss between data and synthetic photometry.
-    #     penalty: torch.Tensor.
-    #         This can be the fraction of bad photometry, or the user-defined penalty term.
-    #     """
-    #     assert noise in [None, 'snr', 'gama',
-    #                      'nsa'], 'Only support `snr`, `nsa`, `gama`, or `None` now.'
-
-    #     if regularize:
-    #         if hasattr(self, "cdf_z") and self.cdf_z is not None:
-    #             sample = inverse_transform_nmf_params_given_z(
-    #                 self.sample(n_samples), self.NDE_prior, self.cdf_z)
-    #         elif hasattr(self, "cdf_mass") and self.cdf_mass is not None:
-    #             sample = inverse_transform_nmf_params_given_mass(
-    #                 self.sample(n_samples), self.NDE_prior, self.cdf_mass)
-    #         else:
-    #             sample = inverse_transform_nmf_params(
-    #                 self.sample(n_samples), self.NDE_prior)
-    #     else:
-    #         sample = self.sample(n_samples)
-
-    #     if hasattr(self, 'anpe_mass_given_z') and self.anpe_mass_given_z is not None:
-    #         # with torch.no_grad():
-    #         sample = torch.hstack(
-    #             [sample, self.anpe_mass_given_z.sample(1, context=sample[:, -1:])[:, 0]])
-
-    #     if hasattr(self, 'anpe_mass_given_all') and self.anpe_mass_given_all is not None:
-    #         # with torch.no_grad():
-    #         sample = torch.hstack(
-    #             [sample, self.anpe_mass_given_all.sample(1, context=sample[:, :])[:, 0]])
-
-    #     # if self.external_redshift_data is not None:
-    #     #     _z = torch.Tensor(np.random.choice(self.external_redshift_data, n_samples)[
-    #     #         :, None]).to(self.device)
-    #     #     sample = torch.hstack([sample[:, :-1], _z, sample[:, -1:]])
-
-    #     # penalty term
-    #     # powers = torch.Tensor(self.penalty_powers).to(self.device)
-    #     # penalty = log_prior(sample,
-    #     #                     torch.Tensor(self.NDE_prior).to(self.device),
-    #     #                     powers)
-    #     # # print('Number of inf:', torch.isinf(penalty).sum())
-    #     # penalty = penalty[~torch.isinf(penalty)].nanmean()
-
-    #     Y = speculator._predict_mag_with_mass_redshift(
-    #         sample, filterset=self.filterset,
-    #         noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
-    #     if self.z_score:
-    #         Y = self.scaler.transform(
-    #             Y,
-    #             device=self.device
-    #         )
-    #     bad_mask = torch.stack([((sample < self.bounds[i][0]) | (sample > self.bounds[i][1]))[
-    #         :, i] for i in range(len(self.bounds))]).sum(dim=0, dtype=bool)
-    #     bad_mask |= (torch.isnan(Y).any(axis=1) |
-    #                  torch.isinf(Y).any(axis=1))
-    #     Y = Y[~bad_mask]
-    #     # print('Bad mask num', bad_mask.sum())
-    #     # penalty = torch.sum(Y[:, 2] > (19.65 - self.scaler.mean[2]) / self.scaler.std[2]) / len(Y) * 10
-    #     penalty = torch.sum(Y[:, 2] > 19.65) / len(Y) * 10
-
-    #     dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
-    #     data_loss = 0.
-    #     for x in dataloader:
-    #         data_loss += loss_fn(Y, x.to(self.device))
-
-    #     loss = data_loss / len(dataloader)  # + penalty
-    #     # loss = loss_fn(Y, X)
-
-    #     if add_penalty:
-    #         # loss += loss_fn((1 * (X[:100, 2:3].clone() - 19.65)), (1 * (Y[:100, 2:3].clone() - 19.65)))
-    #         loss += loss_fn(10**(1 * (X[:, 2:3].clone() - 19.65)),
-    #                         10**(1 * (Y[:, 2:3].clone() - 19.65)))
-
-    #     sample = None
-    #     x = None
-    #     y = None
-    #     Y = None
-    #     dataloader = None
-    #     X = X.to('cpu')
-    #     gc.collect()
-    #     torch.cuda.empty_cache()
-
-    #     return loss, penalty  # torch.zeros_like(loss)  # penalty
 
     def _get_loss_NMF_new(self, X, speculator, n_samples,
                           noise, SNR, noise_model_dir,
@@ -821,7 +670,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             This can be the fraction of bad photometry, or the user-defined penalty term.
         """
         assert noise in [None, 'snr', 'gama',
-                         'nsa'], 'Only support `snr`, `nsa`, `gama`, or `None` now.'
+                         'nsa', 'gama_snr'], 'Only support `snr`, `nsa`, `gama`, or `None` now.'
 
         if regularize:
             if hasattr(self, "cdf_z") and self.cdf_z is not None:
@@ -861,7 +710,10 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         Y = speculator._predict_mag_with_mass_redshift(
             sample, filterset=self.filterset,
-            noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
+            noise=noise, SNR=SNR,
+            noise_model_dir=noise_model_dir,
+            noise_scaling=self.noise_scaling)
+
         if self.z_score:
             Y = self.scaler.transform(
                 Y,
@@ -968,7 +820,13 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             loss, bad_ratio = self._get_loss_NMF_new(X_train, speculator, n_samples,
                                                      noise, SNR, noise_model_dir, L,
                                                      add_penalty=add_penalty, regularize=self.regularize)
-            loss.backward()
+
+            # get validation loss
+            vali_loss, _ = self._get_loss_NMF_new(self.X_vali, speculator, n_samples,  # len(self.X_vali),
+                                                  noise, SNR, noise_model_dir, L,
+                                                  add_penalty, regularize=self.regularize)
+            self.vali_loss_history.append(vali_loss.item())
+
             # loss = 0
             # for i in range(3):
             #     sub_loss, bad_ratio = self._get_loss_NMF_new(X_train, speculator, n_samples,
@@ -977,15 +835,9 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
             #     loss += sub_loss
             # loss /= 3
             # loss.backward()
-
+            loss.backward()
             self.optimizer.step()
             self.train_loss_history.append(loss.item())
-
-            # get validation loss
-            vali_loss, _ = self._get_loss_NMF_new(self.X_vali, speculator, n_samples,  # len(self.X_vali),
-                                                  noise, SNR, noise_model_dir, L,
-                                                  add_penalty, regularize=self.regularize)
-            self.vali_loss_history.append(vali_loss.item())
 
             t.set_description(
                 f'Loss = {loss.item():.3f} (train), {vali_loss.item():.3f} (vali), {bad_ratio.item():.3f} (bad ratio)')

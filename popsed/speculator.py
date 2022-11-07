@@ -1390,17 +1390,36 @@ class SuperSpeculator(Speculator):
             _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
             _noise[(maggies + _noise) < 0] = 0.0
             maggies = maggies.clone() + _noise / SNR
-        elif noise == 'gama_lambdar':
+        elif noise == 'gama_snr':
             self._parse_noise_model(noise_model_dir)
-
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
-            _snrs = torch.zeros_like(mags)
-            _sig_flux = torch.zeros_like(mags)
+            _snrs = torch.zeros_like(maggies)
             for i in range(maggies.shape[1]):
+                # This is actually log10(SNR).
                 _snrs[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
                     0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+            _snrs = 10**_snrs
             _noise = maggies / _snrs * torch.randn_like(mags)
-            _noise[(maggies + _noise) < 0] = 0.0
+            i = 0
+            while torch.any((maggies + _noise) < 0):
+                i += 1
+                _noise[(maggies + _noise) < 0] = (maggies / _snrs *
+                                                  torch.randn_like(mags))[(maggies + _noise) < 0]
+                if i > 100:
+                    _noise[(maggies + _noise) < 0] = 0.0
+                    print('Noise is too negative. Set to 0.')
+                    break
+            # _noise[(maggies + _noise) < 0] = 0.0
+            # print(i)
+            # print(_snrs, maggies, _noise)
+            # mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
+            # _snrs = torch.zeros_like(mags)
+            # _sig_flux = torch.zeros_like(mags)
+            # for i in range(maggies.shape[1]):
+            #     _snrs[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
+            #         0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
+            # _noise = maggies / _snrs * torch.randn_like(mags)
+            # _noise[(maggies + _noise) < 0] = 0.0
             maggies = maggies.clone() + _noise / SNR
         elif noise == 'snr':
             # Add noise with constant SNR.
@@ -1421,7 +1440,7 @@ class SuperSpeculator(Speculator):
     def _predict_mag_with_mass_redshift(self, params,
                                         external_redshift=None,
                                         filterset: list = None,
-                                        noise=None, noise_model_dir=None, SNR=10):
+                                        noise=None, noise_model_dir=None, SNR=10, noise_scaling=1.0):
         """
         Predict corresponding photometry (in magnitude), given SPS physical parameters.
 
@@ -1490,10 +1509,10 @@ class SuperSpeculator(Speculator):
         maggies[maggies <= 0.] = 1e-15
 
         maggies = self._add_photometry_noise(
-            maggies, noise=noise, noise_model_dir=noise_model_dir, SNR=SNR)
+            maggies, noise=noise, noise_model_dir=noise_model_dir, SNR=SNR * (10**noise_scaling + 1))
 
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
-            print(maggies)
+            print(torch.isnan(maggies).sum())
         mags = -2.5 * torch.log10(maggies)
 
         return mags
