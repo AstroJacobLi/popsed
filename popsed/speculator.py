@@ -1302,14 +1302,6 @@ class SuperSpeculator(Speculator):
         params = params.to(self.device)
         spec_rest = self._predict_spec_restframe(params[:, :])  # restframe
 
-        # if torch.any(torch.log10(spec_rest) > thresh):
-        #     # print(f'log spec > {thresh} params:',
-        #     #       params[(torch.log10(spec_rest) > thresh).any(dim=1)])
-        #     print(f'log spec > {thresh} params:', (torch.log10(
-        #         spec_rest) > thresh).any(dim=1).sum())
-        # such that interpolation will not do linear extrapolation.
-        # spec_rest[:, 0] = 0.0  # torch.nan
-        # print(params[:, -2:-1])
         if external_redshift is None:
             spec = self.transform(spec_rest, params[:, -2:-1], islog=False)
         else:
@@ -1319,32 +1311,6 @@ class SuperSpeculator(Speculator):
         spec[torch.any(torch.log10(spec_rest) > thresh, dim=1)] = 1e-30
         return spec
 
-    # def predict_spec(self, params, log_stellar_mass=None, redshift=None):
-    #     """
-    #     Predict the corresponding spectra (in linear scale) for given physical parameters.
-    #     The predicted spectra are in restframe.
-
-    #     Parameters
-    #     ----------
-    #     params: torch.Tensor. The SPS physical parameters, **not including stellar mass and redshift**.
-    #         shape = (n_samples, n_params).
-    #     log_stellar_mass: torch.Tensor or np.ndarray. log10 stellar mass of each spectrum, shape = (n_samples).
-    #     redshift: torch.Tensor or np.ndarray. Redshift of each spectrum, shape = (n_samples).
-
-    #     Returns
-    #     -------
-    #     spec: torch.Tensor. The predicted spectra, shape = (n_wavelength, n_samples).
-    #     """
-    #     if not torch.is_tensor(params):
-    #         params = torch.Tensor(params).to(self.device)
-    #     params = params.to(self.device)
-    #     if log_stellar_mass is None:
-    #         log_stellar_mass = torch.zeros_like(params[:, 0:1])
-    #     if redshift is None:
-    #         redshift = torch.zeros_like(params[:, 0:1])
-
-    #     return self._predict_spec_with_mass_redshift(torch.hstack([params, log_stellar_mass]).to(self.device),
-    #                                                  external_redshift=redshift)
     def _add_photometry_noise(self, maggies, is_maggies=True,
                               noise=None, noise_model_dir=None, SNR=10):
         """
@@ -1509,7 +1475,7 @@ class SuperSpeculator(Speculator):
         maggies[maggies <= 0.] = 1e-15
 
         maggies = self._add_photometry_noise(
-            maggies, noise=noise, noise_model_dir=noise_model_dir, SNR=SNR * (10**noise_scaling + 1))
+            maggies, noise=noise, noise_model_dir=noise_model_dir, SNR=SNR)
 
         if torch.isnan(maggies).any() or torch.isinf(maggies).any():
             print(torch.isnan(maggies).sum())

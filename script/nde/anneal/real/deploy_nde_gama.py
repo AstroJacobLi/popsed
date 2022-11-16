@@ -64,4 +64,4 @@ if __name__ == '__main__':
     fire.Fire(deploy_training_job)
 
 
-# python deploy_nde_gama.py --output_dir='./NDE/GAMA/anneal/real/lr3e-4_ann12_zscore_40e/' --seed_low=0 --seed_high=5 --num_bins=50 --num_transforms=20 --hidden_features=100 --max_lr=3e-4 --anneal_tau=12 --max_epochs=40
+# python deploy_nde_gama.py --output_dir='./NDE/GAMA/anneal/real/lr3e-4_ann12_zscore_40e/' --seed_low=0 --seed_high=5 --num_bins=60 --num_transforms=20 --hidden_features=100 --max_lr=3e-4 --anneal_tau=12 --max_epochs=40

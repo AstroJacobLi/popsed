@@ -606,12 +606,6 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
 
         self.filterset = filterset
 
-        # self.noise_scaling = torch.rand(
-        #     1, requires_grad=True, device=self.device)
-        self.noise_scaling = torch.zeros(
-            [1], requires_grad=True, device=self.device)
-        # torch.nn.Parameter(torch.ones([1])).to(self.device)
-
     def load_validation_data(self, X_vali):
         """
         Load validation data.
@@ -711,8 +705,7 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         Y = speculator._predict_mag_with_mass_redshift(
             sample, filterset=self.filterset,
             noise=noise, SNR=SNR,
-            noise_model_dir=noise_model_dir,
-            noise_scaling=self.noise_scaling)
+            noise_model_dir=noise_model_dir)
 
         if self.z_score:
             Y = self.scaler.transform(
@@ -729,18 +722,14 @@ class WassersteinNeuralDensityEstimator(NeuralDensityEstimator):
         penalty = torch.sum(Y[:, 2] > 19.65) / len(Y) * 10
 
         # add noise to real data too
-        # X = speculator._add_photometry_noise(
-        #     X, is_maggies=False, noise=noise, SNR=SNR, noise_model_dir=noise_model_dir)
         dataloader = DataLoader(X, batch_size=n_samples, shuffle=True)
         data_loss = 0.
         for x in dataloader:
             data_loss += loss_fn(Y, x.to(self.device))
 
         loss = data_loss / len(dataloader)  # + penalty
-        # loss = loss_fn(Y, X)
 
         if add_penalty:
-            # loss += loss_fn((1 * (X[:100, 2:3].clone() - 19.65)), (1 * (Y[:100, 2:3].clone() - 19.65)))
             loss += loss_fn(10**(1 * (X[:, 2:3].clone() - 19.65)),
                             10**(1 * (Y[:, 2:3].clone() - 19.65)))
 

@@ -4,26 +4,23 @@ Using CDF transform
 Use GAMA DR3 aperture matched photometry.
 """
 import os
-# os.environ['CUDA_PATH'] = '/usr/local/cuda-10.2'
 import sys
-import pickle
-import corner
 import numpy as np
 from tqdm import trange
 import fire
-import matplotlib.pyplot as plt
 
 import torch
 from sklearn.model_selection import train_test_split
 
 os.chdir('/scratch/gpfs/jiaxuanl/Data/popsed/')
 sys.path.append('/home/jiaxuanl/Research/popsed/')
-from popsed.speculator import SuperSpeculator
-import popsed
-popsed.set_matplotlib(style='JL', usetex=False, dpi=80)
-from popsed import prior
+from popsed.speculator import SuperSpeculator, StandardScaler
+from torch.utils.data import DataLoader
+from geomloss import SamplesLoss
+import gc
 
 
+PHOT = 'PETRO'
 name = 'NMF'
 wave = np.load(f'./train_sed_{name}/{name.lower()}_seds/fsps.wavelength.npy')
 
@@ -56,30 +53,30 @@ speculator._calc_transmission(gama_filters)
 
 # Load NSA data
 X_data = np.load(
-    './reference_catalog/GAMA/gama_clean_mag_dr3_apmatch.npy')[:, :5]
+    f'./reference_catalog/GAMA/gama_clean_mag_dr3_apmatch_{PHOT}.npy')[:, :5]
+print('Photometry used:', PHOT)
 print('Total number of samples:', len(X_data))
-
-import gc
 gc.collect()
 torch.cuda.empty_cache()
 
 # Determine the intrinsic sampling loss
+scaler = StandardScaler(device='cpu')
+scaler.fit(X_data)
+_X_data = scaler.transform(X_data)
+# Determine the intrinsic sampling loss
 X_datas = []
 for i in range(5):
-    ind = np.random.randint(0, len(X_data), 10000)
-    X_datas.append(torch.Tensor(X_data[ind]).to('cuda'))
-from torch.utils.data import DataLoader
-from geomloss import SamplesLoss
+    ind = np.random.randint(0, len(_X_data), 10000)
+    X_datas.append(torch.Tensor(_X_data[ind]).to('cuda'))
 L = SamplesLoss(loss='sinkhorn', **{'p': 1, 'blur': 0.002, 'scaling': 0.9})
 intr_loss = []
 for i in range(5):
-    dataloader = DataLoader(X_data, batch_size=10000, shuffle=True)
+    dataloader = DataLoader(_X_data, batch_size=10000, shuffle=True)
     data_loss = 0.
     for x in dataloader:
         data_loss += L(X_datas[i], x.to('cuda'))
     loss = data_loss / len(dataloader)
     intr_loss.append(loss.item())
-
 print("Intrinsic sampling loss:", np.mean(intr_loss), '+-', np.std(intr_loss))
 del X_datas
 gc.collect()
@@ -88,7 +85,6 @@ torch.cuda.empty_cache()
 _prior_NDE = speculator.bounds.copy()
 _prior_NDE[-2] = np.array([0., 0.8])
 _prior_NDE[-1] = np.array([7.5, 13.0])
-# _prior_NDE[-4] = np.array([0., 2.0])  # dust_2
 
 
 def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transforms=20,
@@ -99,11 +95,11 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
     from popsed.nde import WassersteinNeuralDensityEstimator
 
     if add_noise:
-        noise = 'gama'
+        noise = 'gama_snr'
     else:
         noise = None
 
-    noise_model_dir = './noise_model/gama_noise_model_mag_dr3_apmatch.npy'
+    noise_model_dir = f'./noise_model/gama_snr_model_mag_dr3_apmatch_{PHOT}.npy'
 
     if multijobs == False:
         seed_range = trange(seed_low, seed_high)
@@ -152,7 +148,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
 
         max_epochs = max_epochs
         blurs = [0.3, 0.3, 0.2, 0.2, 0.1, 0.1,
-                 0.1, 0.05, 0.05, 0.05] + [0.002] * max_epochs
+                 0.1, 0.05, 0.05, 0.05] + [0.001] * max_epochs
         snrs = [1 + anneal_coeff * np.exp(- anneal_tau / max_epochs * i)
                 for i in range(max_epochs)]  # larger anneal_coeff, after annealing
         steps = 30
@@ -170,7 +166,8 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
 
                 print('    Epoch {0}'.format(epoch))
                 print('\n\n')
-                print('    lr:', NDE_theta.optimizer.param_groups[0]['lr'])
+                print(
+                    '    lr:', NDE_theta.optimizer.param_groups[0]['lr'], '  blurs:', blurs[i])
                 NDE_theta.train(n_epochs=steps,
                                 speculator=speculator,
                                 add_penalty=add_penalty,
