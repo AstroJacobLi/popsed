@@ -20,7 +20,7 @@ from geomloss import SamplesLoss
 import gc
 
 
-PHOT = 'PETRO'
+PHOT = 'AUTO'
 name = 'NMF'
 wave = np.load(f'./train_sed_{name}/{name.lower()}_seds/fsps.wavelength.npy')
 
@@ -53,7 +53,7 @@ speculator._calc_transmission(gama_filters)
 
 # Load NSA data
 X_data = np.load(
-    f'./reference_catalog/GAMA/gama_clean_mag_dr3_apmatch_{PHOT}.npy')[:, :5]
+    f'./reference_catalog/GAMA/gama_clean_mag_dr3_apmatch_{PHOT}_snr1.npy')[:, :5]
 print('Photometry used:', PHOT)
 print('Total number of samples:', len(X_data))
 gc.collect()
@@ -99,7 +99,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
     else:
         noise = None
 
-    noise_model_dir = f'./noise_model/gama_snr_model_mag_dr3_apmatch_{PHOT}.npy'
+    noise_model_dir = f'./noise_model/gama_snr_model_mag_dr3_apmatch_{PHOT}_snr1.npy'
 
     if multijobs == False:
         seed_range = trange(seed_low, seed_high)
@@ -148,7 +148,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
 
         max_epochs = max_epochs
         blurs = [0.3, 0.3, 0.2, 0.2, 0.1, 0.1,
-                 0.1, 0.05, 0.05, 0.05] + [0.001] * max_epochs
+                 0.1, 0.05, 0.05, 0.05] + [0.002] * max_epochs
         snrs = [1 + anneal_coeff * np.exp(- anneal_tau / max_epochs * i)
                 for i in range(max_epochs)]  # larger anneal_coeff, after annealing
         steps = 30
@@ -167,7 +167,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
                 print('    Epoch {0}'.format(epoch))
                 print('\n\n')
                 print(
-                    '    lr:', NDE_theta.optimizer.param_groups[0]['lr'], '  blurs:', blurs[i])
+                    '    lr:', NDE_theta.optimizer.param_groups[0]['lr'], '  blurs:', blurs[i], ' snrs:', snrs[i])
                 NDE_theta.train(n_epochs=steps,
                                 speculator=speculator,
                                 add_penalty=add_penalty,
@@ -179,16 +179,18 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
                                     'p': 1, 'blur': blurs[i], 'scaling': 0.9},
                                 scheduler=scheduler
                                 )
-
+                if NDE_theta.vali_loss_history[-1] > 20:
+                    raise ValueError('Validation loss is too large! Next seed!')
+                NDE_theta.save_model(
+                    os.path.join(NDE_theta.output_dir,
+                                f'nde_theta_last_model_{NDE_theta.method}_{NDE_theta.seed}.pkl')
+                )
             print(f'    Succeeded in training for {max_epochs} epochs!')
             print('    Saving NDE model for seed {0}'.format(seed))
             print('\n\n')
             np.save(os.path.join(NDE_theta.output_dir, f'{NDE_theta.method}_{NDE_theta.seed}_sample_{i+1}.npy'),
                     NDE_theta.sample(5000).detach().cpu().numpy())
-            NDE_theta.save_model(
-                os.path.join(NDE_theta.output_dir,
-                             f'nde_theta_last_model_{NDE_theta.method}_{NDE_theta.seed}.pkl')
-            )
+            
         except Exception as e:
             print(e)
 
@@ -196,4 +198,5 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
 if __name__ == '__main__':
     fire.Fire(train_NDEs)
 
+# python train_nde_mock.py --seed_low=0 --seed_high=1 --n_samples=10000 --num_transforms=20 --num_bins=40 --hidden_features=100 --max_lr=3e-4 --output_dir=./NDE/GAMA/anneal/mock/lr3e-4_exp0p25/
 # python train_nde_mock.py --seed_low=0 --seed_high=1 --n_samples=10000 --num_transforms=20 --num_bins=40 --hidden_features=100 --max_lr=3e-4 --output_dir=./NDE/GAMA/anneal/mock/lr3e-4_exp0p25/
