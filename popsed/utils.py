@@ -496,3 +496,37 @@ def set_matplotlib(style='JL', usetex=True, fontsize=13, figsize=(6, 5), dpi=60)
             "scatter.edgecolors": "black",
             "mathtext.fontset": "stixsans"
         })
+
+
+def calc_observables(params, name='NMF'):
+    if name == 'NMF_ZH':
+        from popsed.models import NMF_ZH
+        model = NMF_ZH(burst=True, peraa=True)
+    else:
+        from popsed.models import NMF
+        model = NMF(burst=True, peraa=True)
+
+    sfr = np.zeros(len(params))
+    age = np.zeros(len(params))
+
+    for i in range(len(params)):
+        tt = params[i]
+        sfr[i] = model.avgSFR(tt[:-1], zred=float(tt[-1]), dt=0.5)
+        age[i] = model.tage_MW(tt[:-1], zred=float(tt[-1]))
+
+    if name == 'NMF_ZH':
+        zmw = np.zeros(len(params))
+        for i in range(len(params)):
+            tt = params[i]
+            zmw[i] = model.Z_MW(tt[:-1], zred=float(tt[-1]))
+
+    if name == 'NMF_ZH':
+        logzsol = np.log10(zmw / 0.019)
+    else:
+        logzsol = params[:, 7]
+    redshift = params[:, -1]
+    logmstar = params[:, 0]
+
+    obs_dict = {'logmstar': logmstar, 'logzsol': logzsol,
+                'sfr': sfr, 'age': age, 'redshift': redshift}
+    return obs_dict

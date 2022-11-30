@@ -1,7 +1,7 @@
 """
 Using CDF transform
 
-Use GAMA DR3 aperture matched photometry.
+Use GAMA DR3 aperture matched photometry
 """
 import os
 import sys
@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from geomloss import SamplesLoss
 import gc
 
-
+ismock = False
 PHOT = 'AUTO'
 name = 'NMF'
 wave = np.load(f'./train_sed_{name}/{name.lower()}_seds/fsps.wavelength.npy')
@@ -52,8 +52,11 @@ gama_filters = ['sdss2010-{0}'.format(b) for b in 'ugriz']
 speculator._calc_transmission(gama_filters)
 
 # Load NSA data
-X_data = np.load(
-    f'./reference_catalog/GAMA/gama_clean_mag_dr3_apmatch_{PHOT}_snr1.npy')[:, :5]
+if ismock:
+    X_data = np.load('./NDE/GAMA/NMF/mock_mags_dr3apmatch_noise_2.npy')[:, :5]
+else:
+    X_data = np.load(
+        f'./reference_catalog/GAMA/gama_clean_mag_dr3_apmatch_{PHOT}_snr1.npy')[:, :5]
 print('Photometry used:', PHOT)
 print('Total number of samples:', len(X_data))
 gc.collect()
@@ -99,7 +102,7 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
     else:
         noise = None
 
-    noise_model_dir = f'./noise_model/gama_snr_model_mag_dr3_apmatch_{PHOT}_snr1.npy'
+    noise_model_dir = f'./noise_model/gama_snr_model_mag_dr3_apmatch_{PHOT}.npy'
 
     if multijobs == False:
         seed_range = trange(seed_low, seed_high)
@@ -180,17 +183,18 @@ def train_NDEs(seed_low, seed_high, multijobs=False, n_samples=5000, num_transfo
                                 scheduler=scheduler
                                 )
                 if NDE_theta.vali_loss_history[-1] > 20:
-                    raise ValueError('Validation loss is too large! Next seed!')
+                    raise ValueError(
+                        'Validation loss is too large! Next seed!')
                 NDE_theta.save_model(
                     os.path.join(NDE_theta.output_dir,
-                                f'nde_theta_last_model_{NDE_theta.method}_{NDE_theta.seed}.pkl')
+                                 f'nde_theta_last_model_{NDE_theta.method}_{NDE_theta.seed}.pkl')
                 )
             print(f'    Succeeded in training for {max_epochs} epochs!')
             print('    Saving NDE model for seed {0}'.format(seed))
             print('\n\n')
             np.save(os.path.join(NDE_theta.output_dir, f'{NDE_theta.method}_{NDE_theta.seed}_sample_{i+1}.npy'),
                     NDE_theta.sample(5000).detach().cpu().numpy())
-            
+
         except Exception as e:
             print(e)
 

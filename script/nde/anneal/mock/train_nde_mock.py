@@ -1,13 +1,12 @@
 """
 Using CDF transform
 
-Use GAMA DR3 aperture matched photometry.
+Use GAMA DR3 aperture matched photometry to generate mock data.
+
+Mock data is generated in 
 """
 import os
-# os.environ['CUDA_PATH'] = '/usr/local/cuda-10.2'
 import sys
-import pickle
-import corner
 import numpy as np
 from tqdm import trange
 import fire

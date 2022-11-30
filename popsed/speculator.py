@@ -1354,8 +1354,17 @@ class SuperSpeculator(Speculator):
                 _sig_flux[:, i] = utils.sigma_mag2flux(
                     _sigs_mags[:, i], mags[:, i])  # in nanomaggies
             _noise = _sig_flux * torch.randn_like(mags) * 1e-9  # in maggies
-            _noise[(maggies + _noise) < 0] = 0.0
+            i = 0
+            while torch.any((maggies + _noise) < 0):
+                i += 1
+                _noise[(maggies + _noise) < 0] = (maggies / _snrs *
+                                                  torch.randn_like(mags))[(maggies + _noise) < 0]
+                if i > 100:
+                    _noise[(maggies + _noise) < 0] = 0.0
+                    print('Noise is too negative. Set to 0.')
+                    break
             maggies = maggies.clone() + _noise / SNR
+            
         elif noise == 'gama_snr':
             self._parse_noise_model(noise_model_dir)
             mags = -2.5 * torch.log10(maggies)  # noise-free magnitude
@@ -1365,6 +1374,7 @@ class SuperSpeculator(Speculator):
                 _snrs[:, i] = Interp1d()(self.mag_grid, self.med_sig_grid[:, i], mags[:, i])[
                     0] + Interp1d()(self.mag_grid, self.std_sig_grid[:, i], mags[:, i])[0] * torch.randn_like(mags[:, i])
             _snrs = 10**_snrs
+            self._snrs = _snrs
             _noise = maggies / _snrs * torch.randn_like(mags)
             i = 0
             while torch.any((maggies + _noise) < 0):

@@ -26,7 +26,7 @@ def deploy_training_job(seed_low, seed_high, multijobs=True, python_file='train_
         "#SBATCH --nodes=1",
         "#SBATCH --ntasks-per-node=1",
         "#SBATCH --gres=gpu:1",
-        "#SBATCH --mem=32G",
+        "#SBATCH --mem=48G",
         "#SBATCH --time=%s" % time,
         "#SBATCH --export=ALL",
         f"#SBATCH --array={seed_low}-{seed_high}" if multijobs else "",
@@ -70,3 +70,7 @@ if __name__ == '__main__':
 # python deploy_nde_gama.py --multijobs=False --output_dir='./NDE/GAMA/anneal/real/lr3e-4_ann12_40e_30t/' --seed_low=30 --seed_high=40 --num_bins=60 --num_transforms=30 --hidden_features=100 --max_lr=3e-4 --anneal_tau=12 --max_epochs=40 --anneal_coeff=30
 
 # python deploy_nde_gama.py --multijobs=False --output_dir='./NDE/GAMA/anneal/real/lr3e-4_noisefree_40e/' --seed_low=40 --seed_high=50 --num_bins=60 --num_transforms=20 --hidden_features=100 --max_lr=3e-4 --add_noise=False --max_epochs=40
+
+
+# python deploy_nde_gama.py --multijobs=False --output_dir='./NDE/GAMA/anneal/real/lr3e-4_ann12_40e_40t/' --seed_low=0 --seed_high=8 --num_bins=60 --num_transforms=40 --hidden_features=100 --max_lr=3e-4 --max_epochs=40 --anneal_coeff=30 --anneal_tau=12
+# python deploy_nde_gama.py --multijobs=False --output_dir='./NDE/GAMA/anneal/real/lr2e-4_ann12_40e_30t/' --seed_low=0 --seed_high=8 --num_bins=60 --num_transforms=30 --hidden_features=100 --max_lr=2e-4 --max_epochs=40 --anneal_coeff=30 --anneal_tau=12
