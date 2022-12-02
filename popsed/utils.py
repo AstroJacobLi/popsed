@@ -498,7 +498,7 @@ def set_matplotlib(style='JL', usetex=True, fontsize=13, figsize=(6, 5), dpi=60)
         })
 
 
-def calc_observables(params, name='NMF'):
+def calc_observables(params, name='NMF', dt=0.1):
     if name == 'NMF_ZH':
         from popsed.models import NMF_ZH
         model = NMF_ZH(burst=True, peraa=True)
@@ -511,7 +511,7 @@ def calc_observables(params, name='NMF'):
 
     for i in range(len(params)):
         tt = params[i]
-        sfr[i] = model.avgSFR(tt[:-1], zred=float(tt[-1]), dt=0.5)
+        sfr[i] = model.avgSFR(tt[:-1], zred=float(tt[-1]), dt=dt)
         age[i] = model.tage_MW(tt[:-1], zred=float(tt[-1]))
 
     if name == 'NMF_ZH':
