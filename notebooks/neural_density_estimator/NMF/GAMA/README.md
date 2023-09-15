@@ -1,6 +1,6 @@
 ## GAMA catalogs
 
-I use GAMA DR4: http://www.gama-survey.org/dr4/
+I use GAMA DR3: http://www.gama-survey.org/dr4/
 
 I use the GKV catalogs, which use the GKV ProFound photometry. The photometry catalog is from http://www.gama-survey.org/dr4/schema/table.php?id=684. The stellar masses are from http://www.gama-survey.org/dr4/schema/table.php?id=690. Notice that `logmintsfh` is the closest stellar mass to the stellar mass in PROVABGS.
 
