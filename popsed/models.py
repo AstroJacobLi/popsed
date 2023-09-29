@@ -664,6 +664,49 @@ class NMF(Model):
                       [None, :] * sfh * th, axis=1) / (10**theta['logmstar'])
         return t_mw
 
+    def survMass(self, tt, zred=None, tage=None):
+        ''' given a set of parameter values `tt` and redshift `zred`, 
+        calculate the surviving stellar mass. 
+
+        parameters
+        ----------
+        tt : array_like[Ntheta, Nparam]
+        Parameter values of [log M*, b1SFH, b2SFH, b3SFH, b4SFH, g1ZH, g2ZH,
+        'dust1', 'dust2', 'dust_index']. 
+
+        zred : float 
+            redshift
+
+        tage : float 
+            age of galaxy, in Gyr
+
+        '''
+        from .utils import surviving_mstar
+        if zred is None and tage is None:
+            raise ValueError('specify either zred or tage')
+        if zred is not None and tage is not None:
+            raise ValueError('specify either zred or tage')
+        if tage is None:
+            assert isinstance(zred, float)
+            tage = self.cosmo.age(zred).value  # age in Gyr
+        
+        theta = self._parse_theta(tt)
+        # Get SFH
+        tlb_edges, sfh = self.SFH(tt, zred=zred, _burst=self._burst) # Mstar / yr
+        tages = 0.5 * (tlb_edges[1:] + tlb_edges[:-1])  # ages of SSP
+        dt = np.diff(tlb_edges)  # bin widths
+
+        Msurv = 0 # surviving stellar mass
+        # look over log-spaced lookback time bins and add up SSPs
+        for i, tage in enumerate(tages):
+            m = 1e9 * dt[i] * sfh[i]  # mass formed in this bin
+            if m == 0 and i != 0:
+                continue
+            Msurv += m * surviving_mstar(np.log10(tage * 1e9))
+            
+        return np.log10(Msurv)
+        
+        
     def _load_NMF_bases(self, name='tojeiro.4comp'):
         ''' read in NMF SFH and ZH bases. These bases are used to reduce the
         dimensionality of the SFH and ZH. 
